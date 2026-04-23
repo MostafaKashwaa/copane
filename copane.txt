@@ -1,0 +1,250 @@
+*copane.txt*  AI coding assistant with tmux integration
+
+Version: 0.1.0
+Author: Mostafa Kashwaa
+License: MIT
+
+==============================================================================
+CONTENTS                                                           *copane*
+
+1. Introduction ................ |copane-intro|
+2. Installation ................ |copane-installation|
+3. Configuration ............... |copane-configuration|
+4. Usage ....................... |copane-usage|
+5. Mappings .................... |copane-mappings|
+6. Commands .................... |copane-commands|
+7. Troubleshooting ............. |copane-troubleshooting|
+8. Development ................. |copane-development|
+
+==============================================================================
+1. INTRODUCTION                                             *copane-intro*
+
+copane is an AI-powered coding assistant that runs in a tmux pane and
+integrates with Vim/Neovim. It allows you to send code snippets for review,
+explanation, refactoring, and test generation directly from your editor.
+
+Features:
+- AI-powered code analysis and suggestions
+- tmux integration for persistent sessions
+- Multiple AI model support (DeepSeek, OpenAI, local Ollama)
+- File inclusion in queries
+- Professional terminal interface
+
+==============================================================================
+2. INSTALLATION                                         *copane-installation*
+
+2.1 Quick Installation ~
+
+Run the installation script:
+>
+    git clone https://github.com/MostafaKashwaa/copane.git ~/.vim/pack/plugins/start/copane
+    cd ~/.vim/pack/plugins/start/copane
+    ./install.sh
+<
+
+2.2 Using Package Managers ~
+
+vim-plug:
+>
+    Plug 'MostafaKashwaa/copane', { 'do': './install.sh' }
+<
+
+Vundle:
+>
+    Plugin 'MostafaKashwaa/copane'
+    " Then run :PluginInstall and manually run ./install.sh
+<
+
+dein.vim:
+>
+    call dein#add('MostafaKashwaa/copane')
+<
+
+2.3 Manual Installation ~
+
+For Vim:
+>
+    git clone https://github.com/MostafaKashwaa/copane.git ~/.vim/pack/plugins/start/copane
+<
+
+For Neovim:
+>
+    git clone https://github.com/MostafaKashwaa/copane.git ~/.local/share/nvim/site/pack/plugins/start/copane
+<
+
+Then run the installation script:
+>
+    ./install.sh
+<
+
+==============================================================================
+3. CONFIGURATION                                       *copane-configuration*
+
+3.1 API Keys ~
+
+Create ~/.copane.env:
+>
+    cp .env.example ~/.copane.env
+    # Edit the file and add your API keys
+<
+
+3.2 Vim Configuration ~
+
+Default configuration variables:
+>
+    let g:tmux_agent_python_path = 'python3'
+    let g:tmux_agent_tmux_pane = 'ai-pane'
+    let g:tmux_agent_env_file = expand('~/.copane.env')
+    let g:tmux_agent_venv_dir = expand('~/.vim/copane-venv')
+<
+
+3.3 tmux Configuration ~
+
+The installation script adds this to ~/.tmux.conf:
+>
+    # Split window and start copane
+    bind-key a split-window -h "copane"
+<
+
+==============================================================================
+4. USAGE                                                     *copane-usage*
+
+4.1 Command Line ~
+
+Interactive mode:
+>
+    copane
+<
+
+Quick actions:
+>
+    copane --mode explain --file main.py
+    copane --mode test --text "def add(a,b): return a+b"
+<
+
+Model management:
+>
+    copane --list-models
+    copane --switch gpt-4o
+    copane --model-info
+<
+
+4.2 In tmux ~
+
+Open copane pane: Ctrl-b a
+
+Special commands in interactive mode:
+>
+    /models        - List available models
+    /switch model  - Switch to different model
+    /modelinfo     - Show current model info
+    /clear         - Clear conversation history
+    /help          - Show help
+<
+
+Include files in queries:
+>
+    Please review @main.py and @utils.py
+<
+
+==============================================================================
+5. MAPPINGS                                               *copane-mappings*
+
+Default leader is backslash (\). All mappings work in visual mode unless noted.
+
+| Mapping | Mode | Action |
+|---------|------|--------|
+| \ar     | visual | Review selected code |
+| \ae     | visual | Explain selected code |
+| \af     | visual | Refactor selected code |
+| \at     | visual | Write tests for selected code |
+| \ah     | visual | Think carefully about refactor |
+| \aq     | normal | Quick analysis of current line |
+| \aE     | normal | Review entire file |
+| \ao     | normal | Analyze last command output |
+
+Customize mappings:
+>
+    " Change leader
+    let g:tmux_agent_leader = ','
+    
+    " Custom mapping
+    nmap <leader>cr :call TmuxAgent("review this")<CR>
+<
+
+==============================================================================
+6. COMMANDS                                               *copane-commands*
+
+6.1 Vim Commands ~
+
+:TmuxAgentInstall                    Install copane and dependencies
+
+6.2 Functions ~
+
+TmuxAgent(prompt)                    Send code to copane
+    Example: call TmuxAgent("explain this code")
+
+==============================================================================
+7. TROUBLESHOOTING                                 *copane-troubleshooting*
+
+7.1 Common Issues ~
+
+"Python dependencies not installed":
+>
+    source ~/.vim/copane-venv/bin/activate
+    pip install -e .
+<
+
+"API key not found":
+>
+    # Check your environment file
+    cat ~/.copane.env
+<
+
+"copane command not found":
+>
+    echo 'export PATH="$PATH:$HOME/.local/bin"' >> ~/.bashrc
+    source ~/.bashrc
+<
+
+Vim mappings not working:
+>
+    :echo exists('g:loaded_tmux_agent')  " Should return 1
+    :source ~/.vim/pack/plugins/start/copane/plugin/tmux_agent.vim
+<
+
+7.2 Debug Mode ~
+
+Run with verbose output:
+>
+    copane --verbose
+<
+
+Check dependencies:
+>
+    python python/check_deps.py
+<
+
+==============================================================================
+8. DEVELOPMENT                                           *copane-development*
+
+Project structure:
+>
+    copane/
+    ├── python/              # Python application
+    ├── autoload/            # Vim autoload functions
+    ├── plugin/              # Vim plugin initialization
+    ├── doc/                 # Documentation
+    ├── install.sh           # Installation script
+    └── pyproject.toml       # Python dependencies
+<
+
+Contributing:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:noet:fen:fdm=marker

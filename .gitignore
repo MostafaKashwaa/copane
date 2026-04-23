@@ -1,0 +1,24 @@
+.env
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# editor and IDE files
+.vscode/
+.idea/
+*.swp
+
+history/
+.tmux-agent-history
+
+test/
+*.bak
+*.log
+.copane-history
