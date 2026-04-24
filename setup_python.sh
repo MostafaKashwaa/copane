@@ -33,6 +33,9 @@ VENV_DIR="${1:-$DEFAULT_VENV}"
 # Python minimum version
 PYTHON_MIN_VERSION="3.12"
 
+# Path to the Python package directory (has its own pyproject.toml + uv.lock)
+PYTHON_DIR="${PLUGIN_DIR}/python"
+
 check_python() {
     if ! command -v python3 &>/dev/null; then
         print_error "python3 not found"
@@ -57,51 +60,55 @@ check_python() {
     print_info "Found Python $pyver"
 }
 
+check_uv() {
+    if ! command -v uv &>/dev/null; then
+        print_error "uv not found. Please install it first: https://docs.astral.sh/uv/#installation"
+        print_info "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+    print_info "Found uv"
+}
+
 create_venv() {
     if [[ -d "$VENV_DIR" ]]; then
-        print_warning "Virtual environment already exists at $VENV_DIR"
-        read -p "Recreate it? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$VENV_DIR"
-        else
-            print_info "Using existing virtual environment"
-            return 0
-        fi
+        print_warning "Recreating existing virtual environment at $VENV_DIR"
+        rm -rf "$VENV_DIR"
     fi
 
     print_info "Creating virtual environment at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
+    uv venv --python ">=${PYTHON_MIN_VERSION}" "$VENV_DIR"
     print_success "Virtual environment created"
 }
 
 install_deps() {
-    print_info "Installing Python dependencies..."
+    print_info "Installing Python dependencies with uv..."
 
-    source "${VENV_DIR}/bin/activate"
-
-    pip install --upgrade pip -q
-
-    if [[ -f "$PLUGIN_DIR/pyproject.toml" ]]; then
-        pip install -e "$PLUGIN_DIR" -q
-        print_success "Dependencies installed from pyproject.toml"
-    else
-        print_error "pyproject.toml not found in $PLUGIN_DIR"
-        deactivate
+    if [[ ! -f "$PYTHON_DIR/pyproject.toml" ]]; then
+        print_error "pyproject.toml not found in $PYTHON_DIR"
         exit 1
     fi
 
-    deactivate
+    # uv sync respects VIRTUAL_ENV — it will install into our chosen venv
+    # instead of creating a .venv inside python/
+    VIRTUAL_ENV="$VENV_DIR" \
+    uv sync \
+        --directory "$PYTHON_DIR" \
+        --frozen \
+        -q
+
+    print_success "Dependencies installed"
 }
 
 verify() {
     print_info "Verifying installation..."
 
-    local test_code="import sys; sys.path.insert(0, '${PLUGIN_DIR}'); from python.tmux_agent import agent; print('OK')"
+    local test_code="from tmux_agent import agent; print('OK')"
     if "${VENV_DIR}/bin/python3" -c "$test_code" &>/dev/null; then
         print_success "Python environment ready at $VENV_DIR"
     else
+        # Try with extra detail on failure
         print_error "Verification failed — something went wrong"
+        "${VENV_DIR}/bin/python3" -c "$test_code" 2>&1 || true
         exit 1
     fi
 }
@@ -112,6 +119,7 @@ main() {
     echo ""
 
     check_python
+    check_uv
     create_venv
     install_deps
     verify
@@ -121,7 +129,7 @@ main() {
     echo ""
     echo "  Virtual environment: $VENV_DIR"
     echo "  Activate:            source $VENV_DIR/bin/activate"
-    echo "  Run agent:           $VENV_DIR/bin/python3 $PLUGIN_DIR/python/app.py"
+    echo "  Run agent:           $VENV_DIR/bin/python3 $PYTHON_DIR/app.py"
     echo ""
 }
 
