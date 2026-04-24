@@ -1,13 +1,15 @@
-" copane — AI Coding Agent for tmux
-" Version: 0.1.0
-" Description: AI coding assistant with tmux integration and model management
-" License: MIT
-
 " Prevent loading twice
 if exists('g:loaded_copane')
   finish
 endif
 let g:loaded_copane = 1
+
+" ============================================================================
+" PLUGIN ROOT & VENV PATH (must be set before anything else)
+" ============================================================================
+let s:plugin_root = expand('<sfile>:p:h:h')
+" Default venv now lives inside the plugin, not ~/.vim/copane-venv
+let g:copane_venv_dir = get(g:, 'copane_venv_dir', s:plugin_root . '/python/.venv')
 
 " ============================================================================
 " CONFIGURATION VARIABLES (with defaults)
@@ -17,7 +19,6 @@ let g:loaded_copane = 1
 let g:copane_python_path = get(g:, 'copane_python_path', 'python3')
 let g:copane_default_model = get(g:, 'copane_default_model', 'deepseek-chat')
 let g:copane_env_file = get(g:, 'copane_env_file', expand('~/.copane.env'))
-let g:copane_venv_dir = get(g:, 'copane_venv_dir', expand('~/.vim/copane-venv'))
 
 " tmux pane configuration
 let g:copane_tmux_pane_name = get(g:, 'copane_tmux_pane_name', 'copane')
@@ -64,6 +65,32 @@ function! s:check_prerequisites() abort
 endfunction
 
 " ============================================================================
+" PYTHON PATH SETUP (makes `import copane` work)
+" ============================================================================
+
+function! s:setup_python_path() abort
+  if !isdirectory(g:copane_venv_dir)
+    if g:copane_debug
+      echo 'copane: Virtual environment not found at ' . g:copane_venv_dir
+      echo '       Run :CopaneSetupPython or execute setup_python.sh manually.'
+    endif
+    return
+  endif
+
+  " Use Vim's own Python to detect its version and build the correct path
+  python3 << EOF
+import sys, os
+venv_dir = vim.eval('g:copane_venv_dir')
+major, minor = sys.version_info[:2]
+site_packages = os.path.join(venv_dir, 'lib', f'python{major}.{minor}', 'site-packages')
+if os.path.isdir(site_packages) and site_packages not in sys.path:
+    sys.path.insert(0, site_packages)
+    if int(vim.eval('g:copane_debug')):
+        print(f'copane: Added {site_packages} to sys.path')
+EOF
+endfunction
+
+" ============================================================================
 " SETUP
 " ============================================================================
 
@@ -78,6 +105,9 @@ function! s:setup() abort
     echohl None
     return 0
   endif
+
+  " Make the virtual environment available to Python BEFORE loading autoload
+  call s:setup_python_path()
 
   " Load autoload functions (defines tmux_agent#* and the internal functions)
   runtime autoload/tmux_agent.vim

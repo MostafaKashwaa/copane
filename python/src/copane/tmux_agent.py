@@ -16,7 +16,7 @@ from openai.types.responses import ResponseTextDeltaEvent
 
 from langsmith import traceable
 
-from tools import (
+from copane.tools import (
     read_file,
     run_command,
     grep_files,

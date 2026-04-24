@@ -208,7 +208,7 @@ wheels = [
 [[package]]
 name = "copane"
 version = "0.0.1"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "autopep8" },
     { name = "langsmith" },

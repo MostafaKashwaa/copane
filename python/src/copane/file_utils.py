@@ -3,7 +3,7 @@ import re
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import ANSI
-from term_styles import Colors, print_success, print_error, print_warning
+from copane.term_styles import Colors, print_success, print_error, print_warning
 
 
 class FileCompleter(Completer):

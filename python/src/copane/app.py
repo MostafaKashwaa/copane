@@ -13,8 +13,8 @@ from datetime import datetime
 from prompt_toolkit import ANSI, PromptSession
 from prompt_toolkit.history import FileHistory
 from dotenv import load_dotenv
-from tmux_agent import agent
-from term_styles import (
+from copane.tmux_agent import agent
+from copane.term_styles import (
     Colors,
     LOGO,
     LOGO_COMPACT,
@@ -31,7 +31,7 @@ from term_styles import (
     ARROW_RIGHT,
 )
 
-from file_utils import FileCompleter, expand_files
+from copane.file_utils import FileCompleter, expand_files
 
 load_dotenv(override=True)
 deepseek_key = os.getenv("DEEPSEEK_API_KEY")

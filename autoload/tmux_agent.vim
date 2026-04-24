@@ -103,83 +103,51 @@ endfunction
 " PYTHON SETUP (auto on first use)
 " ============================================================================
 
-" Ensure Python venv and dependencies are ready.
-" Caches result in s:python_ready to avoid repeated checks.
+" Ensure the virtual environment exists and is usable.
+" This only checks for the venv’s python binary – no import test needed.
+" The import inside Vim is handled by plugin/copane.vim.
 function! s:ensure_python_setup() abort
+  " Already checked this Vim session and succeeded
   if exists('s:python_ready') && s:python_ready
     return 1
   endif
 
-  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
-
-  " Quick check: can we import the agent module?
-  let l:test_cmd = 'python3 -c "import sys; sys.path.insert(0, ''' .
-        \ escape(l:plugin_dir, '''') .
-        \ '''); from python.tmux_agent import agent; print(1)" 2>/dev/null'
-  let l:result = system(l:test_cmd)
-  if v:shell_error == 0
+  " If the venv’s python binary exists, we’re good to go
+  let l:venv_python = g:copane_venv_dir . '/bin/python3'
+  if executable(l:venv_python)
     let s:python_ready = 1
     return 1
   endif
 
-  " Try using the venv Python if copane_venv_dir is set
-  if exists('g:copane_venv_dir') && !empty(g:copane_venv_dir)
-    let l:venv_python = g:copane_venv_dir . '/bin/python3'
-    if executable(l:venv_python)
-      let l:test_cmd = l:venv_python . ' -c "import sys; sys.path.insert(0, ''' .
-            \ escape(l:plugin_dir, '''') .
-            \ '''); from python.tmux_agent import agent; print(1)" 2>/dev/null'
-      let l:result = system(l:test_cmd)
-      if v:shell_error == 0
+  " Otherwise, try to run the setup script
+  echohl WarningMsg
+  echo 'copane: Setting up Python environment (one-time)...'
+  echohl None
+
+  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
+  let l:setup_script = l:plugin_dir . '/setup_python.sh'
+
+  if filereadable(l:setup_script)
+    let l:cmd = 'bash ' . shellescape(l:setup_script)
+    call system(l:cmd)
+    if v:shell_error == 0
+      " Re-check after setup
+      let l:venv_python = g:copane_venv_dir . '/bin/python3'
+      if executable(l:venv_python)
         let s:python_ready = 1
+        echohl MoreMsg
+        echo 'copane: Python environment ready.'
+        echohl None
         return 1
       endif
     endif
   endif
 
-  " Not ready — run setup
-  echohl WarningMsg
-  echo 'copane: Setting up Python environment (one-time)...'
+  " If we got here, setup failed
+  echohl ErrorMsg
+  echo 'copane: Python setup failed. Run setup_python.sh manually.'
   echohl None
-
-  " Try setup_python.sh first
-  let l:setup_script = l:plugin_dir . '/setup_python.sh'
-  if filereadable(l:setup_script)
-    let l:cmd = 'cd ' . shellescape(l:plugin_dir) . ' && bash ' . shellescape(l:setup_script)
-    let l:result = system(l:cmd)
-    if v:shell_error == 0
-      let s:python_ready = 1
-      echohl MoreMsg
-      echo 'copane: Python environment ready.'
-      echohl None
-      return 1
-    endif
-  endif
-
-  " Fallback: create venv directly
-  let l:venv = g:copane_venv_dir
-  let l:cmd = 'python3 -m venv ' . l:venv
-  let l:result = system(l:cmd)
-  if v:shell_error != 0
-    echohl ErrorMsg
-    echo 'copane: Failed to create virtual env. Run setup_python.sh manually.'
-    echohl None
-    return 0
-  endif
-  let l:cmd = l:venv . '/bin/pip install -e ' . shellescape(l:plugin_dir) . ' 2>&1'
-  let l:result = system(l:cmd)
-  if v:shell_error != 0
-    echohl ErrorMsg
-    echo 'copane: Failed to install Python deps. Run setup_python.sh manually.'
-    echohl None
-    return 0
-  endif
-
-  let s:python_ready = 1
-  echohl MoreMsg
-  echo 'copane: Python environment ready.'
-  echohl None
-  return 1
+  return 0
 endfunction
 
 " ============================================================================
@@ -224,14 +192,16 @@ function! tmux_agent#open() abort
     " Default: run the copane app using the venv Python if available
     let l:venv_python = g:copane_venv_dir . '/bin/python3'
     let l:plugin_dir = expand('<sfile>:p:h') . '/..'
-    let l:app_script = l:plugin_dir . '/python/app.py'
-    if executable(l:venv_python) && filereadable(l:app_script)
-      let l:start_cmd = l:venv_python . ' ' . shellescape(l:app_script) . ' --no-banner'
-    elseif filereadable(l:app_script)
-      let l:start_cmd = 'python3 ' . shellescape(l:app_script) . ' --no-banner'
+
+    " Prefer running the module via th venv Python
+    if executable(l:venv_python)
+      let l:start_cmd = l:venv_python . ' -m copane.app'
+    elseif filereadable(l:plugin_dir . '/python/src/copane/app.py')
+      let l:start_cmd = 'python3 -m copane.app --no-banner'
     else
       let l:start_cmd = $SHELL
     endif
+    
   endif
   
   let l:create_cmd = 'tmux split-window ' . l:split_flag
