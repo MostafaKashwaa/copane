@@ -80,8 +80,10 @@ function! s:pane_exists(pane_id) abort
   if empty(a:pane_id)
     return 0
   endif
-  let l:cmd = 'tmux list-panes -a -F "#{pane_id}" 2>/dev/null | grep -Fx ' . shellescape(a:pane_id)
+  " let l:cmd = 'tmux list-panes -a -F "#{pane_id}" 2>/dev/null | grep -Fx ' . shellescape(a:pane_id)
+  let l:cmd = 'tmux display -p -t ' . a:pane_id . ' "#{pane_id}" 2>/dev/null'
   let l:result = system(l:cmd)
+  " return v:shell_error == 0
   return v:shell_error == 0 && !empty(trim(l:result))
 endfunction
 
@@ -166,14 +168,45 @@ function! tmux_agent#open() abort
 
   " Step 1: Check if we already have a stored pane that still exists
   let l:pane_id = s:get_stored_pane_id()
-  
+
+  " If the pane exists, move it to the current window and select it.
   if !empty(l:pane_id) && s:pane_exists(l:pane_id)
-    call system('tmux select-pane -t ' . l:pane_id)
-    echohl Title
-    echo 'copane: Selected existing pane ' . l:pane_id
-    echohl None
-    return
+    " Check if it's already in the current window
+    let l:current_window = trim(system('tmux display -p "#{window_id}"'))
+    let l:pane_window = trim(system('tmux display -p -t ' . shellescape(l:pane_id) . ' "#{window_id}"'))
+    
+    if l:pane_window == l:current_window
+      " Pane is already in the current window, just select it
+      call system('tmux select-pane -t ' . l:pane_id)
+      echohl Title
+      echo 'copane: Focused existing pane ' . l:pane_id
+      echohl None
+      return
+    else
+    " Move the pane to the current window
+      let l:split_flag = '-h'
+      if g:copane_split_direction ==# 'horizontal'
+        let l:split_flag = '-v'
+      elseif g:copane_split_direction ==# 'below'
+        let l:split_flag = '-v'
+      endif
+      " call system('tmux join-pane ' . l:split_flag . ' -l ' . g:copane_split_size . ' -s ' . l:pane_id . ' -t ' . l:current_window)
+      call system('tmux join-pane ' . l:split_flag . ' -l ' . g:copane_split_size . ' -s ' . l:pane_id)
+      call system('tmux select-pane -t ' . l:pane_id)
+      echohl Title
+      echo 'copane: Moved existing pane to current window' . l:pane_id
+      echohl None
+      return
+    endif
   endif
+  
+  " if !empty(l:pane_id) && s:pane_exists(l:pane_id)
+  "   call system('tmux select-pane -t ' . l:pane_id)
+  "   echohl Title
+  "   echo 'copane: Selected existing pane ' . l:pane_id
+  "   echohl None
+  "   return
+  " endif
   
   " Step 2: Clear stale stored ID
   call s:clear_pane_id()
@@ -241,8 +274,20 @@ function! tmux_agent#close() abort
     return
   endif
   
-  if s:pane_exists(l:pane_id)
-    call system('tmux kill-pane -t ' . l:pane_id)
+  if !s:pane_exists(l:pane_id)
+    echohl WarningMsg
+    echo 'copane:' . l:pane_id . 'does not exist, clearing stored ID'
+    echohl None
+    call s:clear_pane_id()
+    return
+  endif
+
+  let l:kill_result = system('tmux kill-pane -t ' . l:pane_id)
+  if v:shell_error != 0
+    echohl ErrorMsg
+    echo 'copane: Failed to kill pane ' . l:pane_id
+    echohl None
+    return
   endif
   
   call s:clear_pane_id()
@@ -261,6 +306,18 @@ function! tmux_agent#toggle() abort
   endif
 endfunction
 
+function! s:wait_for_pane_ready(pane_id, timeout_ms) abort
+  let l:start_time = reltime()
+  while reltimefloat(reltime(l:start_time)) < a:timeout_ms / 1000.0
+    let l:content = system('tmux capture-pane -p -t ' . a:pane_id . ' -S -50')
+    if stridx(l:content, '__COPANE_READY__') >= 0 
+      return 1
+    endif
+    sleep 100m
+  endwhile
+  return 0
+endfunction
+    
 " Send text to the copane pane
 function! tmux_agent#send(...) abort
   let l:pane_id = s:get_stored_pane_id()
@@ -271,9 +328,12 @@ function! tmux_agent#send(...) abort
     if empty(l:pane_id)
       return
     endif
-    sleep 500m
+    " sleep 500m
+    call s:wait_for_pane_ready(l:pane_id, 5000) " Wait up to 5 seconds for the pane to be ready
   endif
   
+  " If the caller provided text, use it. Otherwise, send the entire buffer
+  " with context.
   if a:0 >= 1
     let l:text = a:1
   else
@@ -284,11 +344,14 @@ function! tmux_agent#send(...) abort
     endif
   endif
   
-  call system('tmux send-keys -t ' . l:pane_id . ' C-c')
-  sleep 100m
-  call system('tmux send-keys -t ' . l:pane_id . ' -l ' . shellescape(l:text))
-  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  
+  " call s:wait_for_pane_ready(l:pane_id, 5000) " Wait up to 5 seconds for the pane to be ready
+
+  let l:escaped = shellescape(l:text)
+
+  call system('tmux set-buffer -b copane_send ' . l:escaped)
+  call system('tmux paste-buffer -b copane_send -t ' . l:pane_id)
+  call system('tmux send-keys -t ' . l:pane_id . '  C-j')
+
   echohl Comment
   echo 'copane: Sent ' . len(l:text) . ' chars to pane ' . l:pane_id
   echohl None
@@ -342,7 +405,7 @@ function! tmux_agent#model_info() abort
     echohl None
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' C-c')
+  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
   sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /modelinfo Enter')
 endfunction
@@ -355,7 +418,7 @@ function! tmux_agent#switch_model(model_key) abort
     echohl None
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' C-c')
+  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
   sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /switch ' . a:model_key . ' Enter')
   echohl Title
@@ -371,7 +434,7 @@ function! tmux_agent#list_models() abort
     echohl None
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' C-c')
+  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
   sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /models Enter')
 endfunction

@@ -169,6 +169,7 @@ command! -nargs=0 CopaneOpen call tmux_agent#open()
 command! -nargs=0 CopaneClose call tmux_agent#close()
 command! -nargs=0 CopaneToggle call tmux_agent#toggle()
 command! -nargs=* CopaneSend call tmux_agent#send(<f-args>)
+" command! -range CopaneSendVisual <line1>,<line2>call tmux_agent#send_visual()
 command! -range CopaneSendVisual <line1>,<line2>call tmux_agent#send_visual()
 
 " Model management
@@ -214,8 +215,8 @@ endif
 " INITIALIZATION MESSAGE
 " ============================================================================
 
-if !g:copane_no_suggestions
-  echohl Comment
-  echo 'copane loaded. Use :CopaneHelp for commands or <leader>to to open.'
-  echohl None
-endif
+" if !g:copane_no_suggestions
+"   echohl Comment
+"   echo 'copane loaded. Use :CopaneHelp for commands or <leader>to to open.'
+"   echohl None
+" endif

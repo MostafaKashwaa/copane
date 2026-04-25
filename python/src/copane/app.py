@@ -7,12 +7,14 @@ Multi-model, file-aware, terminal-first.
 import os
 import asyncio
 import argparse
+from re import T
 import sys
 from datetime import datetime
 
 from prompt_toolkit import ANSI, PromptSession
 from prompt_toolkit.history import FileHistory
 from dotenv import load_dotenv
+from prompt_toolkit.key_binding.key_bindings import KeyBindings
 from copane.tmux_agent import agent
 from copane.term_styles import (
     Colors,
@@ -293,9 +295,19 @@ async def main():
     else:
         print(f"{Colors.PRIMARY}{Colors.BOLD}{APP_NAME} (no-banner mode){Colors.RESET}\n")
 
+    bindings = KeyBindings()
+    @bindings.add("c-j")
+    def _(event):
+        event.current_buffer.validate_and_handle()
+
     session = PromptSession(
         completer=FileCompleter(),
         history=FileHistory(".copane-history"),
+        complete_while_typing=True,
+        mouse_support=True,
+        multiline=True,
+        prompt_continuation=lambda width, line_number, is_soft_wrap: ANSI(f"{Colors.PRIMARY}{Colors.BOLD}{line_number} {ARROW_RIGHT} {Colors.RESET}"),
+        key_bindings=bindings,
     )
 
     initial = build_initial_query(args)
@@ -303,6 +315,8 @@ async def main():
         await print_streamed_response(agent.stream_response(initial))
         print_section_header(f"{STAR} Interactive Mode", Colors.SUCCESS)
         print("Continue chatting or type 'exit'.\n")
+
+    print("\033[s__COPANE_READY__\033[u", file=sys.stderr, flush=True)  # Sentinel for external tools
 
     while True:
         try:
