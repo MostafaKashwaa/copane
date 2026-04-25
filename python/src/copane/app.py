@@ -35,11 +35,23 @@ from copane.term_styles import (
 
 from copane.file_utils import FileCompleter, expand_files
 
-load_dotenv(override=True)
-deepseek_key = os.getenv("DEEPSEEK_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Brand-configurable constants
+# ── Environment loading ─────────────────────────────────────────────────
+
+def load_env_file(env_path: str | None = None):
+    """
+    Load the .env file from the given path, or fall back to local .env.
+
+    The path is also stored in COPANE_ENV_FILE so that submodules (e.g.
+    tmux_agent) can re-read it if needed.
+    """
+    path = env_path or os.environ.get("COPANE_ENV_FILE") or ".env"
+    load_dotenv(dotenv_path=path, override=True)
+    os.environ.setdefault("COPANE_ENV_FILE", os.path.abspath(path))
+
+
+# ── Brand-configurable constants ────────────────────────────────────────
+
 APP_NAME = "copane"
 APP_TAGLINE = "AI Coding Agent"
 APP_VERSION = "1.0.0"
@@ -51,6 +63,9 @@ LOGO_DISPLAY = f"""
 
 def print_banner():
     """Professional startup banner with system info."""
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
     print("\033[2J\033[H", end="")
 
     print(LOGO_DISPLAY)
@@ -125,6 +140,7 @@ def parse_args():
     parser.add_argument("--list-models", action="store_true", help="List models and exit")
     parser.add_argument("--switch", help="Switch to a different model and exit")
     parser.add_argument("--model-info", action="store_true", help="Show model info and exit")
+    parser.add_argument("--env-file", help="Path to .env file with API keys")
     return parser.parse_args()
 
 
@@ -273,6 +289,9 @@ async def handle_special_commands(user_input: str, session: PromptSession) -> bo
 
 async def main():
     args = parse_args()
+
+    # Load environment file first (before any module-level code depends on it)
+    load_env_file(args.env_file)
 
     if args.list_models:
         print_model_list()

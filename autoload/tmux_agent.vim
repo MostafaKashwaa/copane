@@ -106,7 +106,7 @@ endfunction
 " ============================================================================
 
 " Ensure the virtual environment exists and is usable.
-" This only checks for the venv’s python binary – no import test needed.
+" This only checks for the venv's python binary – no import test needed.
 " The import inside Vim is handled by plugin/copane.vim.
 function! s:ensure_python_setup() abort
   " Already checked this Vim session and succeeded
@@ -114,7 +114,7 @@ function! s:ensure_python_setup() abort
     return 1
   endif
 
-  " If the venv’s python binary exists, we’re good to go
+  " If the venv's python binary exists, we're good to go
   let l:venv_python = g:copane_venv_dir . '/bin/python3'
   if executable(l:venv_python)
     let s:python_ready = 1
@@ -155,6 +155,28 @@ endfunction
 " ============================================================================
 " PUBLIC FUNCTIONS
 " ============================================================================
+
+" Build the command to launch the copane Python app.
+" Includes the environment file path if set.
+function! s:build_start_command() abort
+  let l:venv_python = g:copane_venv_dir . '/bin/python3'
+  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
+
+  if executable(l:venv_python)
+    let l:cmd = l:venv_python . ' -m copane.app'
+  elseif filereadable(l:plugin_dir . '/python/src/copane/app.py')
+    let l:cmd = 'python3 -m copane.app --no-banner'
+  else
+    return $SHELL
+  endif
+
+  " Pass the user-configured env file path, if set
+  if exists('g:copane_env_file') && !empty(g:copane_env_file)
+    let l:cmd .= ' --env-file ' . shellescape(g:copane_env_file)
+  endif
+
+  return l:cmd
+endfunction
 
 " Open (create or focus) the copane pane
 function! tmux_agent#open() abort
@@ -222,19 +244,7 @@ function! tmux_agent#open() abort
   " Build the command to run in the new pane
   let l:start_cmd = g:copane_start_command
   if empty(l:start_cmd)
-    " Default: run the copane app using the venv Python if available
-    let l:venv_python = g:copane_venv_dir . '/bin/python3'
-    let l:plugin_dir = expand('<sfile>:p:h') . '/..'
-
-    " Prefer running the module via th venv Python
-    if executable(l:venv_python)
-      let l:start_cmd = l:venv_python . ' -m copane.app'
-    elseif filereadable(l:plugin_dir . '/python/src/copane/app.py')
-      let l:start_cmd = 'python3 -m copane.app --no-banner'
-    else
-      let l:start_cmd = $SHELL
-    endif
-    
+    let l:start_cmd = s:build_start_command()
   endif
   
   let l:create_cmd = 'tmux split-window ' . l:split_flag
@@ -489,6 +499,7 @@ function! tmux_agent#debug_info() abort
   echo 'Scope: ' . g:copane_pane_scope
   echo 'Split: ' . g:copane_split_direction . ' (' . g:copane_split_size . ')'
   echo 'Venv dir: ' . g:copane_venv_dir
+  echo 'Env file: ' . get(g:, 'copane_env_file', '(not set)')
   echo 'Python ready: ' . (exists('s:python_ready') && s:python_ready ? 'yes' : 'no')
   echohl Title
   echo '=== copane Options ==='

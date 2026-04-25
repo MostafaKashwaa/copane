@@ -11,7 +11,6 @@ from typing import Dict, Any
 
 from agents import Agent, OpenAIChatCompletionsModel, RawResponsesStreamEvent, Tool, Runner
 from openai import AsyncOpenAI
-from dotenv import load_dotenv
 from openai.types.responses import ResponseTextDeltaEvent
 
 from langsmith import traceable
@@ -24,10 +23,6 @@ from copane.tools import (
     write_file,
     get_current_dir
 )
-
-
-# Load environment variables
-load_dotenv(override=True)
 
 
 class ModelConfig:
