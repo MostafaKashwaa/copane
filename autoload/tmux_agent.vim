@@ -176,6 +176,7 @@ function! s:ensure_python_setup() abort
   endif
 
   " If we got here, setup failed
+  let s:python_ready = 0
   echohl ErrorMsg
   echo 'copane: Python setup failed.'
   echo '       Run :CopaneSetupPython or execute setup_python.sh manually.'
@@ -189,6 +190,9 @@ endfunction
 
 " Manually trigger Python setup (for :CopaneSetupPython)
 function! tmux_agent#setup_python() abort
+  " Clear the ready flag so the next action re-runs setup if this fails
+  let s:python_ready = 0
+
   echohl WarningMsg
   echo 'copane: Running Python setup...'
   echohl None
@@ -206,6 +210,7 @@ function! tmux_agent#setup_python() abort
     endif
   endif
 
+  " On failure, s:python_ready remains 0 (cleared at start)
   echohl ErrorMsg
   echo 'copane: Python setup failed.'
   echohl None
