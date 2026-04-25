@@ -312,7 +312,8 @@ copane/
 - **tmux** (required) — for the AI pane
 - **Python 3.12+** (required) — runs the AI agent
 - **Vim 8+ or Neovim 0.5+** — for editor integration
-- **uv** (required for Python setup) — fast Python package installer
+- **uv** (optional) — fast Python package installer (if not present, falls
+  back to python3 + pip)
 
 Python packages (installed automatically into the venv):
 
@@ -323,6 +324,39 @@ Python packages (installed automatically into the venv):
 - `openai` — OpenAI API client
 
 ## Troubleshooting
+
+### "Python setup failed" / Virtual environment not created
+
+If `:CopaneOpen` fails with "Python setup failed", the most common cause
+is that the `venv` module is not available on your system.
+
+**On Debian / Ubuntu / Linux Mint:**
+```bash
+sudo apt install python3-venv
+```
+
+**On RHEL / Fedora / CentOS:**
+```bash
+sudo dnf install python3-virtualenv
+```
+
+**On Arch Linux / Manjaro:**
+```bash
+sudo pacman -S python-virtualenv
+```
+
+**On openSUSE:**
+```bash
+sudo zypper install python3-virtualenv
+```
+
+After installing, run `:CopaneSetupPython` inside Vim or run the setup
+script manually:
+
+```bash
+cd ~/.vim/plugged/copane    # or wherever Vundle installed it
+bash setup_python.sh
+```
 
 ### "Python environment not ready"
 Run `:CopaneSetupPython` to force reinstall.

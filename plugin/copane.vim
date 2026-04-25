@@ -70,24 +70,66 @@ endfunction
 
 function! s:setup_python_path() abort
   if !isdirectory(g:copane_venv_dir)
-    if g:copane_debug
-      echo 'copane: Virtual environment not found at ' . g:copane_venv_dir
-      echo '       Run :CopaneSetupPython or execute setup_python.sh manually.'
-    endif
     return
   endif
 
-  " Use Vim's own Python to detect its version and build the correct path
-  python3 << EOF
+  if has('nvim')
+    " let l:site_packages = g:copane_venv_dir . '/lib/python*/site-packages'
+    " let l:matches = glob(l:site_packages, 0, 1)
+    " if !empty(l:matches)
+    "   let l:pythonpath = getenv('PYTHONPATH')
+    "   let l:selected_site_packages = l:matches[0]
+    "   let $PYTHONPATH = l:selected_site_packages . (empty(l:pythonpath) ? '' : ':' . l:pythonpath)
+    " endif
+  else 
+    python3 << EOF
 import sys, os
 venv_dir = vim.eval('g:copane_venv_dir')
 major, minor = sys.version_info[:2]
 site_packages = os.path.join(venv_dir, 'lib', f'python{major}.{minor}', 'site-packages')
 if os.path.isdir(site_packages) and site_packages not in sys.path:
-    sys.path.insert(0, site_packages)
-    if int(vim.eval('g:copane_debug')):
-        print(f'copane: Added {site_packages} to sys.path')
+  sys.path.insert(0, site_packages)
+  if int(vim.eval('g:copane_debug')):
+    print(f'copane: Added {site_packages} to sys.path')
 EOF
+  endif
+
+  " For neovim, use system() instead of inline python.
+  " if has('nvim')
+  "   let l:site-packages = g:copane_venv_dir . '/lib/python*/site-packages'
+  "    if isdirectory(glob(l:site-packages))
+  "      let l:pythonpath = glob(l:site-packages)
+  "      if index(split($PYTHONPATH, ':'), l:pythonpath) < 0
+  "        let $PYTHONPATH = l:pythonpath . ':' . $PYTHONPATH
+  "        if g:copane_debug
+  "          echo 'copane: Added ' . l:pythonpath . ' to PYTHONPATH'
+  "        endif
+  "      endif
+  "    else
+  "      if g:copane_debug
+  "        echo 'copane: site-packages not found in venv at ' . g:copane_venv_dir
+  "      endif
+  "    endif
+  "    return
+  " endif
+  "   if g:copane_debug
+  "     echo 'copane: Virtual environment not found at ' . g:copane_venv_dir
+  "     echo '       Run :CopaneSetupPython or execute setup_python.sh manually.'
+  "   endif
+  "   return
+  " endif
+
+  " Use Vim's own Python to detect its version and build the correct path
+"  python3 << EOF
+" import sys, os
+" venv_dir = vim.eval('g:copane_venv_dir')
+" major, minor = sys.version_info[:2]
+" site_packages = os.path.join(venv_dir, 'lib', f'python{major}.{minor}', 'site-packages')
+" if os.path.isdir(site_packages) and site_packages not in sys.path:
+"     sys.path.insert(0, site_packages)
+"     if int(vim.eval('g:copane_debug')):
+"         print(f'copane: Added {site_packages} to sys.path')
+" EOF
 endfunction
 
 " ============================================================================
