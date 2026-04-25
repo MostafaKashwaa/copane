@@ -80,7 +80,7 @@ function! s:setup_python_path() abort
     "   let l:pythonpath = getenv('PYTHONPATH')
     "   let l:selected_site_packages = l:matches[0]
     "   let $PYTHONPATH = l:selected_site_packages . (empty(l:pythonpath) ? '' : ':' . l:pythonpath)
-    endif
+    " endif
   else 
     python3 << EOF
 import sys, os
