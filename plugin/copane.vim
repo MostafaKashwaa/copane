@@ -89,8 +89,8 @@ major, minor = sys.version_info[:2]
 site_packages = os.path.join(venv_dir, 'lib', f'python{major}.{minor}', 'site-packages')
 if os.path.isdir(site_packages) and site_packages not in sys.path:
   sys.path.insert(0, site_packages)
-if int(vim.eval('g:copane_debug')):
-  print(f'copane: Added {site_packages} to sys.path')
+  if int(vim.eval('g:copane_debug')):
+    print(f'copane: Added {site_packages} to sys.path')
 EOF
   endif
 
