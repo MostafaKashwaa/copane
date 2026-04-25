@@ -152,6 +152,10 @@ function! s:setup_global_mappings() abort
   execute 'nnoremap <silent> ' . prefix . 'm :CopaneModelInfo<CR>'
   execute 'nnoremap <silent> ' . prefix . 'M :CopaneListModels<CR>'
 
+  " Config files
+  execute 'nnoremap <silent> ' . prefix . 'e :CopaneEditSecrets<CR>'
+  execute 'nnoremap <silent> ' . prefix . 'E :CopaneEditConfig<CR>'
+
   " Help
   execute 'nnoremap <silent> ' . prefix . 'h :CopaneHelp<CR>'
 
@@ -176,6 +180,10 @@ command! -range CopaneSendVisual <line1>,<line2>call tmux_agent#send_visual()
 command! -nargs=0 CopaneModelInfo call tmux_agent#model_info()
 command! -nargs=1 CopaneSwitchModel call tmux_agent#switch_model(<f-args>)
 command! -nargs=0 CopaneListModels call tmux_agent#list_models()
+
+" Config file editing
+command! -nargs=0 CopaneEditConfig  call copane#edit_model_config()
+command! -nargs=0 CopaneEditSecrets call copane#edit_secrets()
 
 " Utility commands
 command! -nargs=0 CopaneSetupPython call tmux_agent#setup_python()
