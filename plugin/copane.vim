@@ -75,9 +75,11 @@ function! s:setup_python_path() abort
 
   if has('nvim')
     let l:site_packages = g:copane_venv_dir . '/lib/python*/site-packages'
-    let l:glob = glob(l:site_packages)
-    if !empty(l:glob)
-      let $PYTHONPATH = l:glob . ':' . get($, 'PYTHONPATH', '')
+    let l:matches = glob(l:site_packages, 0, 1)
+    if !empty(l:matches)
+      let l:pythonpath = getenv('PYTHONPATH')
+      let l:selected_site_packages = l:matches[0]
+      let $PYTHONPATH = l:selected_site_packages . (empty(l:pythonpath) ? '' : ':' . l:pythonpath)
     endif
   else 
   python3 << EOF
