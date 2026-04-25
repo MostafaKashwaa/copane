@@ -69,13 +69,22 @@ check_uv() {
     return 1
 }
 
+# Check if an existing .venv is usable (has a working python binary)
+venv_is_usable() {
+    [[ -x ".venv/bin/python3" ]] && ".venv/bin/python3" --version &>/dev/null
+}
+
 # --- uv-based setup (fast path) ---
 setup_with_uv() {
     cd "$PYTHON_DIR"
 
-    if [[ -d ".venv" ]]; then
+    if venv_is_usable; then
         print_info "Existing virtual environment found. Running uv sync..."
     else
+        if [[ -d ".venv" ]]; then
+            print_info "Broken virtual environment found. Recreating..."
+            rm -rf ".venv"
+        fi
         print_info "Creating virtual environment via uv..."
     fi
 
@@ -94,9 +103,13 @@ setup_with_uv() {
 setup_with_venv() {
     cd "$PYTHON_DIR"
 
-    if [[ -d ".venv" ]]; then
+    if venv_is_usable; then
         print_info "Existing virtual environment found. Updating..."
     else
+        if [[ -d ".venv" ]]; then
+            print_info "Broken virtual environment found. Removing and recreating..."
+            rm -rf ".venv"
+        fi
         print_info "Creating virtual environment using python3 -m venv..."
 
         # Try creating the venv; capture stderr for a helpful error message
@@ -125,6 +138,14 @@ setup_with_venv() {
             echo ""
             exit 1
         }
+
+        # Double-check the newly created venv is actually usable
+        if ! venv_is_usable; then
+            print_error "Virtual environment was created but appears broken."
+            print_error "  Missing or non-executable: .venv/bin/python3"
+            print_error "  Try removing the .venv directory and running again."
+            exit 1
+        fi
 
         print_success "Virtual environment created at ${VENV_DIR}"
     fi
