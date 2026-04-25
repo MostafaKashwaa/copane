@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # copane — Python Environment Setup Script
-# Creates a virtual environment inside the plugin’s python/ folder
-# and installs the copane package (editable) via uv sync.
+# Creates a virtual environment inside the plugin's python/ folder
+# and installs the copane package in editable mode.
+#
+# Prefers uv (fast), falls back to python3 -m venv + pip (portable).
 #
 # This script is called by Vim automatically (post-update hook) or manually.
 # Usage: bash setup_python.sh
 
 set -euo pipefail
 
-# --- Colors (unchanged) ---
+# --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,13 +23,13 @@ print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # --- Determine directories ---
-# Plugin root = where this script lives (e.g., ~/.vim/plugged/copane)
+# Plugin root = where this script lives
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Python project directory (contains pyproject.toml, uv.lock, src/)
 PYTHON_DIR="${PLUGIN_DIR}/python"
 
-# Virtual environment will live INSIDE the python directory
+# Virtual environment lives INSIDE the python directory
 VENV_DIR="${PYTHON_DIR}/.venv"
 
 # Minimum Python version
@@ -59,39 +61,88 @@ check_python() {
 }
 
 check_uv() {
-    if ! command -v uv &>/dev/null; then
-        print_error "uv not found. Please install it first:"
-        print_info "  curl -LsSf https://astral.sh/uv/install.sh | sh"
-        exit 1
+    if command -v uv &>/dev/null; then
+        print_info "Found uv ($(uv --version 2>/dev/null || echo 'unknown'))"
+        return 0
     fi
-    print_info "Found uv ($(uv --version 2>/dev/null || echo 'unknown'))"
+    print_info "uv not found — will use venv + pip instead"
+    return 1
 }
 
-setup_venv_and_install() {
-    # Move into the Python project directory – uv must run from there
+# --- uv-based setup (fast path) ---
+setup_with_uv() {
     cd "$PYTHON_DIR"
 
-    # If .venv already exists and is functional, we can skip recreation
-    # unless the lock file is newer (optional, kept simple for now).
     if [[ -d ".venv" ]]; then
-        print_info "Existing virtual environment found. Running uv sync to update..."
+        print_info "Existing virtual environment found. Running uv sync..."
     else
-        print_info "No virtual environment found. Creating one at ${VENV_DIR}..."
-        # uv sync will create the venv if it doesn't exist (when run from a project)
+        print_info "Creating virtual environment via uv..."
     fi
 
-    # uv sync: creates/updates .venv, installs all deps, and installs the
-    # copane package in editable mode (because we are inside the project).
-    # --frozen ensures we use exactly the versions from uv.lock.
-    uv sync --frozen
+    # If uv.lock exists, use --frozen for reproducible installs.
+    # Otherwise, let uv resolve dependencies fresh.
+    if [[ -f "uv.lock" ]]; then
+        uv sync --frozen
+    else
+        uv sync
+    fi
 
-    print_success "Dependencies installed into ${VENV_DIR}"
+    print_success "Dependencies installed into ${VENV_DIR} (via uv)"
+}
+
+# --- venv + pip setup (fallback path) ---
+setup_with_venv() {
+    cd "$PYTHON_DIR"
+
+    if [[ -d ".venv" ]]; then
+        print_info "Existing virtual environment found. Updating..."
+    else
+        print_info "Creating virtual environment using python3 -m venv..."
+
+        # Try creating the venv; capture stderr for a helpful error message
+        local venv_output
+        venv_output=$(python3 -m venv ".venv" 2>&1) || {
+            print_error "Failed to create virtual environment with python3 -m venv."
+            echo ""
+            echo "  This usually means the python3-venv package is missing."
+            echo "  On Debian/Ubuntu, install it with:"
+            echo ""
+            echo "    sudo apt install python3-venv"
+            echo ""
+            echo "  On RHEL/Fedora:"
+            echo ""
+            echo "    sudo dnf install python3-virtualenv"
+            echo ""
+            echo "  On Arch Linux:"
+            echo ""
+            echo "    sudo pacman -S python-virtualenv"
+            echo ""
+            echo "  For other systems, see:"
+            echo "    https://docs.python.org/3/library/venv.html"
+            echo ""
+            echo "  Original error:"
+            echo "    $venv_output"
+            echo ""
+            exit 1
+        }
+
+        print_success "Virtual environment created at ${VENV_DIR}"
+    fi
+
+    # Upgrade pip inside the venv — older systems ship a stale pip
+    print_info "Upgrading pip..."
+    .venv/bin/python3 -m pip install --upgrade pip -q
+
+    # Install the package in editable mode
+    print_info "Installing copane package and dependencies..."
+    .venv/bin/python3 -m pip install -e . -q
+
+    print_success "Dependencies installed into ${VENV_DIR} (via venv + pip)"
 }
 
 verify() {
     print_info "Verifying installation..."
 
-    # Use the venv's python to test importing our package
     local test_code="import copane; print(copane.__file__)"
     if "${VENV_DIR}/bin/python3" -c "$test_code" &>/dev/null; then
         print_success "copane package is importable"
@@ -111,10 +162,13 @@ main() {
 
     # 1. Prerequisites
     check_python
-    check_uv
 
-    # 2. Create/update venv and install package
-    setup_venv_and_install
+    # 2. Check for uv — fast path or fallback
+    if check_uv; then
+        setup_with_uv
+    else
+        setup_with_venv
+    fi
 
     # 3. Quick sanity check
     verify
@@ -124,7 +178,7 @@ main() {
     echo ""
     echo "  Virtual environment: ${VENV_DIR}"
     echo "  Activate temporarily:  source ${VENV_DIR}/bin/activate"
-    echo "  Run app:               ${VENV_DIR}/bin/python3 ${PYTHON_DIR}/src/copane/app.py"
+    echo "  Run app:               ${VENV_DIR}/bin/python3 -m copane.app"
     echo ""
 }
 

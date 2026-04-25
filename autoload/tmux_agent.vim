@@ -80,10 +80,8 @@ function! s:pane_exists(pane_id) abort
   if empty(a:pane_id)
     return 0
   endif
-  " let l:cmd = 'tmux list-panes -a -F "#{pane_id}" 2>/dev/null | grep -Fx ' . shellescape(a:pane_id)
   let l:cmd = 'tmux display -p -t ' . a:pane_id . ' "#{pane_id}" 2>/dev/null'
   let l:result = system(l:cmd)
-  " return v:shell_error == 0
   return v:shell_error == 0 && !empty(trim(l:result))
 endfunction
 
@@ -105,9 +103,47 @@ endfunction
 " PYTHON SETUP (auto on first use)
 " ============================================================================
 
+" Run the setup script, capturing and displaying its output so the user
+" sees progress and any errors.
+function! s:run_setup_script() abort
+  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
+  let l:setup_script = l:plugin_dir . '/setup_python.sh'
+
+  if !filereadable(l:setup_script)
+    echohl ErrorMsg
+    echo 'copane: setup_python.sh not found at ' . l:setup_script
+    echohl None
+    return 0
+  endif
+
+  " Check if bash is available
+  if !executable('bash')
+    echohl ErrorMsg
+    echo 'copane: bash not found (required by setup_python.sh)'
+    echohl None
+    return 0
+  endif
+
+  let l:cmd = 'bash ' . shellescape(l:setup_script) . ' 2>&1'
+  let l:output = system(l:cmd)
+  let l:exit_code = v:shell_error
+
+  " Display the script output to the user (strip ANSI escape codes for Vim)
+  if !empty(l:output)
+    " Strip ANSI color codes
+    let l:clean = substitute(l:output, '\e\[[0-9;]*m', '', 'g')
+    " Display each line
+    for l:line in split(l:clean, "\n")
+      if !empty(l:line)
+        echo l:line
+      endif
+    endfor
+  endif
+
+  return l:exit_code == 0
+endfunction
+
 " Ensure the virtual environment exists and is usable.
-" This only checks for the venv's python binary – no import test needed.
-" The import inside Vim is handled by plugin/copane.vim.
 function! s:ensure_python_setup() abort
   " Already checked this Vim session and succeeded
   if exists('s:python_ready') && s:python_ready
@@ -126,28 +162,23 @@ function! s:ensure_python_setup() abort
   echo 'copane: Setting up Python environment (one-time)...'
   echohl None
 
-  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
-  let l:setup_script = l:plugin_dir . '/setup_python.sh'
+  let l:success = s:run_setup_script()
 
-  if filereadable(l:setup_script)
-    let l:cmd = 'bash ' . shellescape(l:setup_script)
-    call system(l:cmd)
-    if v:shell_error == 0
-      " Re-check after setup
-      let l:venv_python = g:copane_venv_dir . '/bin/python3'
-      if executable(l:venv_python)
-        let s:python_ready = 1
-        echohl MoreMsg
-        echo 'copane: Python environment ready.'
-        echohl None
-        return 1
-      endif
+  if l:success
+    let l:venv_python = g:copane_venv_dir . '/bin/python3'
+    if executable(l:venv_python)
+      let s:python_ready = 1
+      echohl MoreMsg
+      echo 'copane: Python environment ready.'
+      echohl None
+      return 1
     endif
   endif
 
   " If we got here, setup failed
   echohl ErrorMsg
-  echo 'copane: Python setup failed. Run setup_python.sh manually.'
+  echo 'copane: Python setup failed.'
+  echo '       Run :CopaneSetupPython or execute setup_python.sh manually.'
   echohl None
   return 0
 endfunction
@@ -155,6 +186,31 @@ endfunction
 " ============================================================================
 " PUBLIC FUNCTIONS
 " ============================================================================
+
+" Manually trigger Python setup (for :CopaneSetupPython)
+function! tmux_agent#setup_python() abort
+  echohl WarningMsg
+  echo 'copane: Running Python setup...'
+  echohl None
+
+  let l:success = s:run_setup_script()
+
+  if l:success
+    let l:venv_python = g:copane_venv_dir . '/bin/python3'
+    if executable(l:venv_python)
+      let s:python_ready = 1
+      echohl MoreMsg
+      echo 'copane: Python setup complete.'
+      echohl None
+      return 1
+    endif
+  endif
+
+  echohl ErrorMsg
+  echo 'copane: Python setup failed.'
+  echohl None
+  return 0
+endfunction
 
 " Build the command to launch the copane Python app.
 " Includes the environment file path if set.
@@ -212,7 +268,6 @@ function! tmux_agent#open() abort
       elseif g:copane_split_direction ==# 'below'
         let l:split_flag = '-v'
       endif
-      " call system('tmux join-pane ' . l:split_flag . ' -l ' . g:copane_split_size . ' -s ' . l:pane_id . ' -t ' . l:current_window)
       call system('tmux join-pane ' . l:split_flag . ' -l ' . g:copane_split_size . ' -s ' . l:pane_id)
       call system('tmux select-pane -t ' . l:pane_id)
       echohl Title
@@ -221,14 +276,6 @@ function! tmux_agent#open() abort
       return
     endif
   endif
-  
-  " if !empty(l:pane_id) && s:pane_exists(l:pane_id)
-  "   call system('tmux select-pane -t ' . l:pane_id)
-  "   echohl Title
-  "   echo 'copane: Selected existing pane ' . l:pane_id
-  "   echohl None
-  "   return
-  " endif
   
   " Step 2: Clear stale stored ID
   call s:clear_pane_id()
@@ -286,7 +333,7 @@ function! tmux_agent#close() abort
   
   if !s:pane_exists(l:pane_id)
     echohl WarningMsg
-    echo 'copane:' . l:pane_id . 'does not exist, clearing stored ID'
+    echo 'copane: ' . l:pane_id . ' does not exist, clearing stored ID'
     echohl None
     call s:clear_pane_id()
     return
@@ -338,7 +385,6 @@ function! tmux_agent#send(...) abort
     if empty(l:pane_id)
       return
     endif
-    " sleep 500m
     call s:wait_for_pane_ready(l:pane_id, 5000) " Wait up to 5 seconds for the pane to be ready
   endif
   
@@ -353,8 +399,6 @@ function! tmux_agent#send(...) abort
       let l:text = 'File: ' . l:filepath . "\n\n```\n" . l:text . "\n```"
     endif
   endif
-  
-  " call s:wait_for_pane_ready(l:pane_id, 5000) " Wait up to 5 seconds for the pane to be ready
 
   let l:escaped = shellescape(l:text)
 
@@ -415,8 +459,6 @@ function! tmux_agent#model_info() abort
     echohl None
     return
   endif
-  " call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  " sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /modelinfo C-j')
 endfunction
 
@@ -428,8 +470,6 @@ function! tmux_agent#switch_model(model_key) abort
     echohl None
     return
   endif
-  " call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  " sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /switch ' . a:model_key . ' C-j')
   echohl Title
   echo 'copane: Switching to model: ' . a:model_key
@@ -444,8 +484,6 @@ function! tmux_agent#list_models() abort
     echohl None
     return
   endif
-  " call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  " sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /models C-j')
 endfunction
 
@@ -458,8 +496,6 @@ function! tmux_agent#clear_history() abort
   if empty(l:pane_id)
     return
   endif
-  " call system('tmux send-keys -t ' . l:pane_id . ' C-c')
-  " sleep 100m
   call system('tmux send-keys -t ' . l:pane_id . ' /clear C-j')
   echohl Title
   echo 'copane: History cleared'
