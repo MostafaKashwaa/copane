@@ -415,9 +415,9 @@ function! tmux_agent#model_info() abort
     echohl None
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  sleep 100m
-  call system('tmux send-keys -t ' . l:pane_id . ' /modelinfo Enter')
+  " call system('tmux send-keys -t ' . l:pane_id . ' Enter')
+  " sleep 100m
+  call system('tmux send-keys -t ' . l:pane_id . ' /modelinfo C-j')
 endfunction
 
 function! tmux_agent#switch_model(model_key) abort
@@ -428,9 +428,9 @@ function! tmux_agent#switch_model(model_key) abort
     echohl None
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  sleep 100m
-  call system('tmux send-keys -t ' . l:pane_id . ' /switch ' . a:model_key . ' Enter')
+  " call system('tmux send-keys -t ' . l:pane_id . ' Enter')
+  " sleep 100m
+  call system('tmux send-keys -t ' . l:pane_id . ' /switch ' . a:model_key . ' C-j')
   echohl Title
   echo 'copane: Switching to model: ' . a:model_key
   echohl None
@@ -444,9 +444,9 @@ function! tmux_agent#list_models() abort
     echohl None
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' Enter')
-  sleep 100m
-  call system('tmux send-keys -t ' . l:pane_id . ' /models Enter')
+  " call system('tmux send-keys -t ' . l:pane_id . ' Enter')
+  " sleep 100m
+  call system('tmux send-keys -t ' . l:pane_id . ' /models C-j')
 endfunction
 
 " ============================================================================
@@ -458,9 +458,9 @@ function! tmux_agent#clear_history() abort
   if empty(l:pane_id)
     return
   endif
-  call system('tmux send-keys -t ' . l:pane_id . ' C-c')
-  sleep 100m
-  call system('tmux send-keys -t ' . l:pane_id . ' /clear Enter')
+  " call system('tmux send-keys -t ' . l:pane_id . ' C-c')
+  " sleep 100m
+  call system('tmux send-keys -t ' . l:pane_id . ' /clear C-j')
   echohl Title
   echo 'copane: History cleared'
   echohl None
