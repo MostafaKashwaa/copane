@@ -74,15 +74,15 @@ function! s:setup_python_path() abort
   endif
 
   if has('nvim')
-    let l:site_packages = g:copane_venv_dir . '/lib/python*/site-packages'
-    let l:matches = glob(l:site_packages, 0, 1)
-    if !empty(l:matches)
-      let l:pythonpath = getenv('PYTHONPATH')
-      let l:selected_site_packages = l:matches[0]
-      let $PYTHONPATH = l:selected_site_packages . (empty(l:pythonpath) ? '' : ':' . l:pythonpath)
+    " let l:site_packages = g:copane_venv_dir . '/lib/python*/site-packages'
+    " let l:matches = glob(l:site_packages, 0, 1)
+    " if !empty(l:matches)
+    "   let l:pythonpath = getenv('PYTHONPATH')
+    "   let l:selected_site_packages = l:matches[0]
+    "   let $PYTHONPATH = l:selected_site_packages . (empty(l:pythonpath) ? '' : ':' . l:pythonpath)
     endif
   else 
-  python3 << EOF
+    python3 << EOF
 import sys, os
 venv_dir = vim.eval('g:copane_venv_dir')
 major, minor = sys.version_info[:2]
