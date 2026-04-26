@@ -106,7 +106,7 @@ endfunction
 " Run the setup script, capturing and displaying its output so the user
 " sees progress and any errors.
 function! s:run_setup_script() abort
-  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
+  let l:plugin_dir = g:copane_plugin_root
   let l:setup_script = l:plugin_dir . '/setup_python.sh'
 
   if !filereadable(l:setup_script)
