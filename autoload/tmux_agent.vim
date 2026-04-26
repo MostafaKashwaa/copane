@@ -106,8 +106,7 @@ endfunction
 " Run the setup script, capturing and displaying its output so the user
 " sees progress and any errors.
 function! s:run_setup_script() abort
-  let l:plugin_dir = g:copane_plugin_root
-  let l:setup_script = l:plugin_dir . '/setup_python.sh'
+  let l:setup_script = g:copane_plugin_root . '/setup_python.sh'
 
   if !filereadable(l:setup_script)
     echohl ErrorMsg
@@ -221,11 +220,10 @@ endfunction
 " Includes the environment file path if set.
 function! s:build_start_command() abort
   let l:venv_python = g:copane_venv_dir . '/bin/python3'
-  let l:plugin_dir = expand('<sfile>:p:h') . '/..'
 
   if executable(l:venv_python)
     let l:cmd = l:venv_python . ' -m copane.app'
-  elseif filereadable(l:plugin_dir . '/python/src/copane/app.py')
+  elseif filereadable(g:copane_plugin_root . '/python/src/copane/app.py')
     let l:cmd = 'python3 -m copane.app --no-banner'
   else
     return $SHELL
