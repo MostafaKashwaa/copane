@@ -10,6 +10,7 @@ let g:loaded_copane = 1
 let s:plugin_root = expand('<sfile>:p:h:h')
 " Default venv now lives inside the plugin, not ~/.vim/copane-venv
 let g:copane_venv_dir = get(g:, 'copane_venv_dir', s:plugin_root . '/python/.venv')
+let g:copane_plugin_root = s:plugin_root
 
 " ============================================================================
 " CONFIGURATION VARIABLES (with defaults)
