@@ -7,7 +7,6 @@ Multi-model, file-aware, terminal-first.
 import os
 import asyncio
 import argparse
-from re import T
 import sys
 from datetime import datetime
 
