@@ -27,7 +27,7 @@ from copane.tools import (
 
 class ModelConfig:
     """Configuration for AI models with professional management."""
-    
+
     def __init__(self):
         self.config_dir = Path.home() / ".config" / "tmux-agent"
         self.config_file = self.config_dir / "model_config.json"
@@ -58,13 +58,13 @@ class ModelConfig:
             }
         }
         self._ensure_config()
-    
+
     def _ensure_config(self):
         """Ensure configuration directory and file exist."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
         if not self.config_file.exists():
             self.save_config(self.default_config)
-    
+
     def load_config(self) -> Dict[str, Any]:
         """Load configuration from file."""
         try:
@@ -72,17 +72,17 @@ class ModelConfig:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
             return self.default_config
-    
+
     def save_config(self, config: Dict[str, Any]):
         """Save configuration to file."""
         with open(self.config_file, 'w') as f:
             json.dump(config, f, indent=2)
-    
+
     def get_selected_model(self) -> str:
         """Get the currently selected model."""
         config = self.load_config()
         return config.get("selected_model", "deepseek-chat")
-    
+
     def set_selected_model(self, model_key: str):
         """Set the selected model."""
         config = self.load_config()
@@ -90,19 +90,20 @@ class ModelConfig:
             config["selected_model"] = model_key
             self.save_config(config)
         else:
-            raise ValueError(f"Model '{model_key}' not found in available models")
-    
+            raise ValueError(
+                f"Model '{model_key}' not found in available models")
+
     def get_available_models(self) -> Dict[str, Dict[str, Any]]:
         """Get all available models."""
         config = self.load_config()
         return config.get("available_models", {})
-    
+
     def add_custom_model(self, key: str, model_config: Dict[str, Any]):
         """Add a custom model configuration."""
         config = self.load_config()
         config["available_models"][key] = model_config
         self.save_config(config)
-    
+
     def remove_model(self, key: str):
         """Remove a model configuration."""
         config = self.load_config()
@@ -130,13 +131,13 @@ class TmuxAgent:
             get_current_dir
         ]
         self.model_config = ModelConfig()
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the current model."""
         selected_key = self.model_config.get_selected_model()
         models = self.model_config.get_available_models()
         model_info = models.get(selected_key, {})
-        
+
         return {
             "key": selected_key,
             "name": model_info.get("model_name", selected_key),
@@ -146,29 +147,29 @@ class TmuxAgent:
             "env_key": model_info.get("env_key", ""),
             "status": self._check_model_status(model_info)
         }
-    
+
     def _check_model_status(self, model_info: Dict[str, Any]) -> str:
         """Check if the model is available and configured."""
         env_key = model_info.get("env_key", "")
-        
+
         if model_info.get("type") == "local":
             # For local models, we just check if the base URL is accessible
             return "available" if model_info.get("base_url") else "unavailable"
-        
+
         if env_key:
             api_key = os.getenv(env_key)
             if api_key:
                 return "configured"
             else:
                 return "missing_api_key"
-        
+
         return "unknown"
-    
+
     def list_available_models(self) -> Dict[str, Dict[str, Any]]:
         """List all available models with their status."""
         models = self.model_config.get_available_models()
         result = {}
-        
+
         for key, config in models.items():
             status = self._check_model_status(config)
             result[key] = {
@@ -178,34 +179,36 @@ class TmuxAgent:
                 "status": status,
                 "is_selected": key == self.model_config.get_selected_model()
             }
-        
+
         return result
-    
+
     def switch_model(self, model_key: str):
         """Switch to a different model."""
         models = self.model_config.get_available_models()
         if model_key not in models:
-            raise ValueError(f"Model '{model_key}' not found. Available models: {list(models.keys())}")
-        
+            raise ValueError(
+                f"Model '{model_key}' not found. Available models: {list(models.keys())}")
+
         self.model_config.set_selected_model(model_key)
         # Reset the agent to use the new model
         self.agent = None
-    
+
     @traceable(name="Change Mode")
     def setup(self):
         """Setup the agent with the selected model."""
         selected_key = self.model_config.get_selected_model()
         models = self.model_config.get_available_models()
         model_config = models.get(selected_key, {})
-        
+
         if not model_config:
-            raise ValueError(f"Model configuration for '{selected_key}' not found")
-        
+            raise ValueError(
+                f"Model configuration for '{selected_key}' not found")
+
         model_type = model_config.get("type")
         model_name = model_config.get("model_name", selected_key)
         base_url = model_config.get("base_url")
         env_key = model_config.get("env_key", "")
-        
+
         if model_type == "api":
             api_key = os.getenv(env_key)
             if not api_key:
@@ -213,7 +216,7 @@ class TmuxAgent:
                     f"API key for {selected_key} not found. "
                     f"Please set {env_key} in your .env file."
                 )
-            
+
             client = AsyncOpenAI(
                 base_url=base_url,
                 api_key=api_key,
@@ -222,7 +225,7 @@ class TmuxAgent:
                 model=model_name,
                 openai_client=client,
             )
-        
+
         elif model_type == "local":
             client = AsyncOpenAI(
                 base_url=base_url,
@@ -232,10 +235,10 @@ class TmuxAgent:
                 model=model_name,
                 openai_client=client,
             )
-        
+
         else:
             raise ValueError(f"Unknown model type: {model_type}")
-        
+
         self.agent = Agent(
             name=self.name,
             instructions="""
@@ -252,7 +255,7 @@ If asked to modify code, show the diff or write the file directly.
             tools=self.tools,
             model=model,
         )
-    
+
     def add_message(self, role: str, content: str):
         """Add a message to the conversation history."""
         self.messages.append({"role": role, "content": content})
@@ -260,6 +263,10 @@ If asked to modify code, show the diff or write the file directly.
     def clear_messages(self):
         """Clear the conversation history."""
         self.messages = []
+
+    def get_message_count(self) -> int:
+        """Get the number of messages in the conversation history."""
+        return len(self.messages)//2  # Each turn has a user and assistant message
 
     @traceable(run_type='llm', name="Stream Response")
     async def stream_response(self, user_input: str):
