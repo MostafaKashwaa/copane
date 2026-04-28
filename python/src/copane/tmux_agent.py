@@ -300,6 +300,5 @@ def get_agent() -> TmuxAgent:
     """Get the singleton instance of TmuxAgent."""
     global _agent
     if _agent is None:
-        print("Initializing TmuxAgent...")
         _agent = TmuxAgent(name="tmux-agent")
     return _agent
