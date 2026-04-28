@@ -19,7 +19,7 @@ print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Configuration (mirrors install.sh)
-PYTHON_VENV_DIR="${HOME}/.vim/copane-venv"
+PYTHON_VENV_DIR="${HOME}/.copane/venv"
 ENV_FILE="${HOME}/.copane.env"
 BIN_FILE="${HOME}/.local/bin/copane"
 TMUX_CONF="${HOME}/.tmux.conf"
@@ -91,15 +91,26 @@ main() {
         fi
     fi
 
-    # 2. .env file
+    # 2. .env file (shared with the Vim/Neovim plugin — removing it will break the plugin)
     if [[ -f "$ENV_FILE" ]] && [[ "$KEEP_ENV" == false ]]; then
         if $DRY_RUN; then
             print_info "[DRY RUN] Would remove: $ENV_FILE"
             REMOVED_ANY=true
-        elif $AUTO_YES || confirm "Remove $ENV_FILE?"; then
+        elif $AUTO_YES; then
             rm -f "$ENV_FILE"
             print_success "Removed: $ENV_FILE"
             REMOVED_ANY=true
+        else
+            print_warning "~/.copane.env is shared with the Vim/Neovim plugin."
+            print_warning "Removing it will break the plugin until you recreate it."
+            echo ""
+            if confirm "Remove ~/.copane.env?"; then
+                rm -f "$ENV_FILE"
+                print_success "Removed: $ENV_FILE"
+                REMOVED_ANY=true
+            else
+                print_info "Skipped: $ENV_FILE"
+            fi
         fi
     fi
 
