@@ -45,6 +45,9 @@ from copane.term_styles import (
 from copane.file_utils import FileCompleter, expand_files
 
 
+
+COPANE_HISTORY = os.path.expanduser('~/.local/share/copane/.copane_history')
+
 # ── Environment loading ─────────────────────────────────────────────────
 
 def load_env_file(env_path: str | None = None):
@@ -54,7 +57,8 @@ def load_env_file(env_path: str | None = None):
     The path is also stored in COPANE_ENV_FILE so that submodules (e.g.
     tmux_agent) can re-read it if needed.
     """
-    path = env_path or os.environ.get("COPANE_ENV_FILE") or ".env"
+    default_path = os.path.expanduser("~/.copane.env")
+    path = env_path or os.environ.get("COPANE_ENV_FILE") or default_path
     load_dotenv(dotenv_path=path, override=True)
     os.environ.setdefault("COPANE_ENV_FILE", os.path.abspath(path))
 
@@ -80,7 +84,7 @@ def create_prompt_session() -> PromptSession:
 
     return PromptSession(
         completer=FileCompleter(),
-        history=FileHistory(".copane-history"),
+        history=FileHistory(COPANE_HISTORY),
         complete_while_typing=True,
         mouse_support=True,
         multiline=True,
@@ -164,7 +168,7 @@ def _show_interactive_header(mode: str):
 
 # ── Main loop ──────────────────────────────────────────────────────────
 
-async def main():
+async def async_main():
     args = parse_args()
 
     # Load environment file first (before any module-level code depends on it)
@@ -232,11 +236,21 @@ async def main():
             print_info("Continuing…\n")
 
 
-if __name__ == "__main__":
+def main():
     try:
-        asyncio.run(main())
+        asyncio.run(async_main())
     except KeyboardInterrupt:
         print(f"\n{Colors.SUCCESS}Goodbye!{Colors.RESET}")
     except Exception as e:
         print_error(f"Fatal error: {e}")
         sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+    # try:
+    #     asyncio.run(main())
+    # except KeyboardInterrupt:
+    #     print(f"\n{Colors.SUCCESS}Goodbye!{Colors.RESET}")
+    # except Exception as e:
+    #     print_error(f"Fatal error: {e}")
+    #     sys.exit(1)

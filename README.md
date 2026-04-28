@@ -59,18 +59,22 @@ git clone https://github.com/MostafaKashwaa/copane.git \
 ### Standalone Terminal (without Vim)
 
 ```bash
-git clone https://github.com/MostafaKashwaa/copane.git
-cd copane
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/MostafaKashwaa/copane/main/install.sh | sh
 ```
 
-This installs the `copane` command to `~/.local/bin/`.
+This installs the `copane` command to `~/.local/bin/`. Make sure
+`~/.local/bin` is in your PATH (add `export PATH="$PATH:$HOME/.local/bin"`
+to `~/.bashrc` if not).
+
+Prerequisites: `python3`, `python3-venv`, `git`, `tmux`.
+
+Then configure your API keys (see [Configuration](#configuration)).
 
 ## Configuration
 
 ### 1. API Keys
 
-Copy the example env file and add your keys:
+Create `~/.copane.env` with your API keys:
 
 ```bash
 cp .env.example ~/.copane.env
@@ -299,10 +303,9 @@ copane/
 ├── doc/
 │   └── copane.txt              ← Vim help file (:help copane)
 ├── install.sh                  ← Standalone terminal install
-├── setup_python.sh             ← Python venv setup script
+├── setup_python.sh             ← Python venv setup script (plugin)
 ├── uninstall.sh                ← Cleanup script
-├── pyproject.toml              ← Python packaging (root)
-├── python/pyproject.toml       ← Python packaging (sub-project)
+├── python/pyproject.toml       ← Python packaging
 ├── .env.example                ← Environment template
 └── README.md                   ← This file
 ```
@@ -314,6 +317,7 @@ copane/
 - **Vim 8+ or Neovim 0.5+** — for editor integration
 - **uv** (optional) — fast Python package installer (if not present, falls
   back to python3 + pip)
+- **git** (required for install.sh) — clones the repository
 
 Python packages (installed automatically into the venv):
 
@@ -354,7 +358,7 @@ After installing, run `:CopaneSetupPython` inside Vim or run the setup
 script manually:
 
 ```bash
-cd ~/.vim/plugged/copane    # or wherever Vundle installed it
+cd ~/.vim/plugged/copane    # or wherever vim-plug installed it
 bash setup_python.sh
 ```
 
