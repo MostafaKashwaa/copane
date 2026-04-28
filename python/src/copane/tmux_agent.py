@@ -293,4 +293,13 @@ If asked to modify code, show the diff or write the file directly.
         self.add_message("assistant", text_response)
 
 
-agent = TmuxAgent(name="tmux-agent")
+# agent = TmuxAgent(name="tmux-agent")
+_agent = None  # Initialize the agent lazily to avoid setup issues on import
+
+def get_agent() -> TmuxAgent:
+    """Get the singleton instance of TmuxAgent."""
+    global _agent
+    if _agent is None:
+        print("Initializing TmuxAgent...")
+        _agent = TmuxAgent(name="tmux-agent")
+    return _agent
