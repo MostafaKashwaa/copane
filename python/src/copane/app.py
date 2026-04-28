@@ -47,6 +47,7 @@ from copane.file_utils import FileCompleter, expand_files
 
 
 COPANE_HISTORY = os.path.expanduser('~/.local/share/copane/.copane_history')
+os.makedirs(os.path.dirname(COPANE_HISTORY), exist_ok=True)
 
 # ── Environment loading ─────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ def load_env_file(env_path: str | None = None):
     """
     default_path = os.path.expanduser("~/.copane.env")
     path = env_path or os.environ.get("COPANE_ENV_FILE") or default_path
+    path = os.path.expanduser(path)
     load_dotenv(dotenv_path=path, override=True)
     os.environ.setdefault("COPANE_ENV_FILE", os.path.abspath(path))
 
@@ -247,10 +249,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # try:
-    #     asyncio.run(main())
-    # except KeyboardInterrupt:
-    #     print(f"\n{Colors.SUCCESS}Goodbye!{Colors.RESET}")
-    # except Exception as e:
-    #     print_error(f"Fatal error: {e}")
-    #     sys.exit(1)

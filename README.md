@@ -59,7 +59,7 @@ git clone https://github.com/MostafaKashwaa/copane.git \
 ### Standalone Terminal (without Vim)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MostafaKashwaa/copane/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MostafaKashwaa/copane/main/install.sh | bash
 ```
 
 This installs the `copane` command to `~/.local/bin/`. Make sure
