@@ -1,6 +1,6 @@
 *copane.txt*  AI coding assistant with tmux integration
 
-Version: 0.1.0
+Version: 1.0.0
 Author: Mostafa Kashwaa
 License: MIT
 
@@ -26,20 +26,22 @@ refactoring, explanation, and test generation directly from your editor.
 Features:
   - AI-powered code analysis and suggestions
   - Tmux integration for persistent assistant session
-  - Multiple AI model support (DeepSeek, OpenAI, Anthropic, Ollama)
+  - Multiple AI model support (DeepSeek, OpenAI, Ollama)
   - Custom model endpoints via model_config.json
   - File inclusion in queries via @filename
   - Professional terminal interface with syntax highlighting
   - Conversation history across buffer splits
+  - File completion (Tab) and multi-line input
+  - AI agent tools (read files, run commands, grep, list files)
 
 ==============================================================================
 2. INSTALLATION                                         *copane-installation*
 
 Requirements:
-  - Python 3.8+
+  - Python 3.12+
   - tmux
   - Vim 8+ or Neovim 0.5+
-  - pip (for Python dependencies)
+  - pip or uv (package manager)
 
 2.1 Using vim-plug ~
 
@@ -51,7 +53,13 @@ Add to your ~/.vimrc (or ~/.config/nvim/init.vim for Neovim):
 Then run:
 >
     :PlugInstall
-    :CopaneInstall
+    :CopaneOpen
+<
+
+The Python virtual environment is set up automatically on first use.
+If the automatic setup fails, run:
+>
+    :CopaneSetupPython
 <
 
 2.2 Manual Installation ~
@@ -68,9 +76,28 @@ For Neovim:
       ~/.local/share/nvim/site/pack/plugins/start/copane
 <
 
-Then source your config and run:
+Set up the Python environment:
 >
-    :CopaneInstall
+    bash ~/.vim/plugged/copane/setup_python.sh
+<
+
+2.3 Standalone Installation (without a plugin manager) ~
+
+    bash <(curl -sSL https://raw.githubusercontent.com/MostafaKashwaa/copane/main/install.sh)
+
+This installs copane to ~/.copane/ and adds the `copane` command to
+~/.local/bin/. Make sure that directory is on your PATH.
+
+2.4 Running from the terminal ~
+
+Once installed, you can run copane directly:
+>
+    copane
+<
+
+Or using the virtual environment directly:
+>
+    ~/.vim/plugged/copane/python/.venv/bin/python3 -m copane.app
 <
 
 ==============================================================================
@@ -88,9 +115,10 @@ Add your API keys. Supported variables:
 >
     DEEPSEEK_API_KEY=sk-...
     OPENAI_API_KEY=sk-...
-    ANTHROPIC_API_KEY=sk-ant-...
+    GROQ_API_KEY=gsk_your-groq-api-key
+    OPENROUTER_API_KEY=sk-or-v1-your-openrouter-api-key
     OLLAMA_BASE_URL=http://localhost:11434
-<
+
 
 You can also set any other environment variables your custom endpoints
 require. The file is loaded via python-dotenv.
@@ -99,7 +127,19 @@ The default location is ~/.copane.env. Override it with: >
     let g:copane_env_file = '/path/to/your/.env'
 <
 
-3.2 Model Configuration ~
+3.2 LangSmith Tracing (Optional) ~
+
+The plugin uses langsmith to trace tool calls and LLM responses. To enable,
+set the standard LangSmith environment variables in your .copane.env: >
+    LANGCHAIN_TRACING_V2=true
+    LANGCHAIN_API_KEY=lsv2_pt_...
+    LANGCHAIN_PROJECT=copane
+<
+
+See the LangSmith documentation at
+https://docs.smith.langchain.com for setup details.
+
+3.3 Model Configuration ~
 
 Models and endpoints are stored in:
   ~/.config/tmux-agent/model_config.json
@@ -113,7 +153,12 @@ Open it quickly: >
     :CopaneEditConfig
 <
 
-3.3 Vim Configuration ~
+Default models include:
+  - deepseek-chat (DeepSeek Chat — default)
+  - gpt-4o (OpenAI GPT-4o)
+  - local-ollama (Local Ollama with gemma4:26b)
+
+3.4 Vim Configuration ~
 
 All configuration variables use the g:copane_ prefix.
 
@@ -121,40 +166,70 @@ General settings: >
     " Python executable for the copane app
     let g:copane_python_path = 'python3'
 
-    " Name of the tmux pane (used to find existing pane)
-    let g:copane_tmux_pane = 'ai-pane'
+    " Name of the tmux pane (used to identify the copane pane)
+    let g:copane_tmux_pane_name = 'copane'
 
     " Environment file for API keys
     let g:copane_env_file = expand('~/.copane.env')
 
     " Virtual environment directory
-    let g:copane_venv_dir = expand('~/.vim/plugged/copane/venv')
+    let g:copane_venv_dir = expand('~/.vim/plugged/copane/python/.venv')
+
+    " Default model on startup
+    let g:copane_default_model = 'deepseek-chat'
 
     " Tmux target for the pane (empty = current session)
     let g:copane_tmux_target = ''
 <
 
 Tmux pane appearance: >
-    " Size of the split pane (number or percentage like '30%')
-    let g:copane_pane_size = '30%'
+    " Size of the split pane (number or percentage like '33%')
+    let g:copane_split_size = '33%'
 
-    " Direction of the split: 'horizontal' or 'vertical'
-    let g:copane_pane_direction = 'vertical'
+    " Direction of the split:
+    "   'vertical'   — split horizontally (pane on the right)
+    "   'horizontal' — split vertically (pane below)
+    "   'below'      — same as 'horizontal'
+    let g:copane_split_direction = 'vertical'
+
+    " Pane scope:
+    "   'session' — one pane for the entire tmux session
+    "   'window'  — one pane per tmux window
+    let g:copane_pane_scope = 'session'
+
+    " Custom start command (overrides the auto-detected command)
+    let g:copane_start_command = ''
 
     " Automatically open copane on startup
     let g:copane_auto_open = 0
 <
 
-Keybinding behavior: >
-    " Default mapping uses <Plug>Copane prefix with <leader>t
+Keybinding and UI: >
+    " Prefix for all default mappings (default: <leader>t)
+    let g:copane_mapping_prefix = '<leader>t'
+
     " Disable default mappings entirely
     let g:copane_no_mappings = 0
 
+    " Show the startup banner (1) or skip it (0)
+    let g:copane_show_banner = 1
+
     " Debug mode (verbose output)
     let g:copane_debug = 0
+
+    " Hide the "Ready!" suggestion message on load
+    let g:copane_no_suggestions = 0
 <
 
-3.4 tmux Configuration ~
+Feature flags: >
+    " Load filetype-specific copane plugins (ftplugin/)
+    let g:copane_enable_ftplugin = 1
+
+    " Enable Neovim async remote plugin integration
+    let g:copane_enable_neovim_async = 1
+<
+
+3.5 tmux Configuration ~
 
 For a convenient keybinding to open copane, add to ~/.tmux.conf:
 >
@@ -164,55 +239,117 @@ For a convenient keybinding to open copane, add to ~/.tmux.conf:
 ==============================================================================
 4. COMMANDS                                               *copane-commands*
 
-4.1 Setup Commands ~
+4.1 Pane Commands ~
 
-:CopaneInstall
-    Install Python dependencies inside the virtual environment.
-    Creates the venv if it doesn't exist.
-    Must be run after adding the plugin.
+:CopaneOpen
+    Open (create or focus) the copane tmux pane. If a copane pane
+    already exists in the current tmux session, it will be moved to
+    the current window and selected. Otherwise, a new pane is created
+    running the copane Python app.
+
+:CopaneClose
+    Close the copane tmux pane. Clears the stored pane ID.
+
+:CopaneToggle
+    Toggle focus between the copane pane and the previously selected pane.
+
+4.2 Send Commands ~
+
+:CopaneSend [text]
+    Send the current buffer content (with file path) to copane.
+    If optional text is provided, send that instead.
+
+:'<,'>CopaneSend
+    Send the visual selection (with file path and line numbers) to
+    copane. Works in visual mode with the range marker.
+
+4.3 Model Commands ~
+
+:CopaneModelInfo
+    Show information about the currently selected model in the pane.
+
+:CopaneSwitchModel {key}
+    Switch to a different model (e.g. deepseek-chat, gpt-4o,
+    local-ollama).
+
+:CopaneListModels
+    List all available models with their status and type.
+
+4.4 Setup Commands ~
+
+:CopaneSetupPython
+    Run the Python setup script (setup_python.sh) to create the
+    virtual environment and install dependencies.
+    Runs automatically on first :CopaneOpen if the venv doesn't exist.
 
 :CopaneEditSecrets
     Open the API keys environment file (~/.copane.env by default).
-    If the file doesn't exist, creates it from .env.example template.
+    If the file doesn't exist, creates it from a template.
 
 :CopaneEditConfig
     Open the model configuration file
     (~/.config/tmux-agent/model_config.json).
     Creates it with default models if it doesn't exist.
 
-4.2 Debug Commands ~
+4.5 Utility Commands ~
 
-:CopaneDebugInfo
-    Show diagnostic information: paths, pane status, Python version,
-    model config location, and current environment file.
+:CopaneHelp
+    Show a quick-reference help summary in the Vim command line.
+
+:CopaneDebug
+    Show diagnostic information: stored pane ID, pane status,
+    session scope, venv path, env file, and current options.
+
+:CopaneClearHistory
+    Clear the conversation history inside the copane pane.
+
+4.6 Legacy Commands ~
+
+The following aliases exist for backward compatibility:
+>
+    TmuxAgentOpen       (same as :CopaneOpen)
+    TmuxAgentClose      (same as :CopaneClose)
+    TmuxAgentSend       (same as :CopaneSend)
+    TmuxAgentSendVisual (same as :CopaneSendVisual)
+<
 
 ==============================================================================
 5. MAPPINGS                                               *copane-mappings*
 
-All mappings are defined using the |g:copane_mapping_prefix| variable
-(default |<leader>t|). The table below shows them with the default prefix.
+All mappings use the |g:copane_mapping_prefix| variable (default
+|<leader>t|). The table below shows them with the default prefix.
 
 To use a different prefix: >
     let g:copane_mapping_prefix = '<leader>x'
 <
 
 Mapping              Mode   Action~
-<Leader>ta           normal Send current line to copane
-<Plug>CopaneCurrentLine
-
+<Leader>to           normal Open copane pane (:CopaneOpen)
+<Leader>tc           normal Close copane pane (:CopaneClose)
+<Leader>tt           normal Toggle copane pane (:CopaneToggle)
+<Leader>ts           normal Send current buffer (:CopaneSend)
+<Leader>ts           visual Send visual selection (:CopaneSendVisual)
+<Leader>tm           normal Show current model info (:CopaneModelInfo)
+<Leader>tM           normal List available models (:CopaneListModels)
 <Leader>te           normal Edit secrets file (:CopaneEditSecrets)
-<Plug>CopaneEditSecrets
-
 <Leader>tE           normal Edit model config (:CopaneEditConfig)
-<Plug>CopaneEditConfig
+<Leader>th           normal Show help (:CopaneHelp)
+
+Filetype-specific mappings (ftplugin/) add:
+<Leader>ta           normal Send buffer (Python/JS buffers)
+<Leader>ta           visual Send selection (Python/JS buffers)
+<Leader>te           normal Explain code (Python/JS buffers)
+<Leader>te           visual Explain selection (Python/JS buffers)
+<Leader>tt           normal Write tests (Python/JS buffers)
+<Leader>tt           visual Write tests for selection (Python/JS buffers)
 
 To disable default mappings: >
     let g:copane_no_mappings = 1
 <
 
 Then define your own: >
-    nmap <leader>cc <Plug>CopaneCurrentLine
-    nmap <leader>cs <Plug>CopaneEditSecrets
+    nmap <leader>cc :CopaneSend<CR>
+    nmap <leader>cs :CopaneEditSecrets<CR>
 <
 
 ==============================================================================
@@ -225,15 +362,19 @@ Run directly in a terminal:
     copane
 <
 
-Or from Vim using the pane (sent via |<Plug>CopaneCurrentLine| or any
-mapping that launches the pane). The plugin will:
-  1. Check for an existing tmux pane named "ai-pane"
-  2. Create one if it doesn't exist (splitting the current window)
-  3. Send your query to the Python app running in that pane
+Or from Vim:
+>
+    :CopaneOpen
+<
 
-6.2 Modes and Options ~
+The plugin will:
+  1. Check for an existing copane pane (by stored pane ID)
+  2. Move it to the current window if it exists in the session
+  3. Create a new one if it doesn't exist (splitting the current window)
+  4. Run the Python app inside the pane
 
-Command-line flags: >
+6.2 Command-line Flags ~
+>
     # Interactive mode (default)
     copane
 
@@ -241,6 +382,7 @@ Command-line flags: >
     copane --mode explain --file main.py
     copane --mode test --text "def add(a,b): return a+b"
     copane --mode review --file main.py
+    copane --mode refactor --file src/utils.py
 
     # Model management
     copane --list-models
@@ -250,8 +392,8 @@ Command-line flags: >
     # Use a specific env file
     copane --env-file ~/.copane.env
 
-    # Verbose output
-    copane --verbose
+    # Skip the banner (useful for embedding)
+    copane --no-banner
 <
 
 6.3 Interactive Commands ~
@@ -263,6 +405,12 @@ While in the copane terminal, use these special commands:
     /modelinfo            Show current model details
     /clear                Clear conversation history
     /help                 Show help
+    exit / quit / q       Exit copane
+
+Keyboard shortcuts:
+    Ctrl-C                Cancel current response (asks for confirmation)
+    Tab                   Auto-complete file paths (after @)
+    Ctrl-J                Submit multi-line input
 
 6.4 File Inclusion ~
 
@@ -272,22 +420,34 @@ Reference files in your query by prefixing with @:
     Explain the @src/utils.py::parse_config function
 <
 
+Use Tab to auto-complete file paths after typing @.
+
+6.5 AI Agent Tools ~
+
+The copane agent has access to the following tools and will use them
+proactively to understand your codebase:
+
+  - read_file(path, start_line, end_line)
+  - run_command(cmd)
+  - grep_files(pattern, path, file_glob)
+  - list_files(path, depth)
+  - write_file(path, content)     — requires confirmation
+  - get_current_dir()
+
 ==============================================================================
 7. TROUBLESHOOTING                                 *copane-troubleshooting*
 
 7.1 "Python dependencies not installed" ~
 
-Run the installation command:
+Run the setup command:
 >
-    :CopaneInstall
+    :CopaneSetupPython
 <
 
 Or manually:
 >
     cd ~/.vim/plugged/copane
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install -e .
+    bash setup_python.sh
 <
 
 7.2 "API key not found" ~
@@ -303,7 +463,7 @@ Or from the shell:
 <
 
 Also verify the file is loaded: >
-    :CopaneDebugInfo
+    :CopaneDebug
 <
 
 Look for the "Env file" line.
@@ -312,12 +472,12 @@ Look for the "Env file" line.
 
 Ensure the virtual environment's bin directory is on your PATH:
 >
-    export PATH="$PATH:$HOME/.vim/plugged/copane/venv/bin"
+    export PATH="$PATH:$HOME/.vim/plugged/copane/python/.venv/bin"
 <
 
 Or use the full path:
 >
-    ~/.vim/plugged/copane/venv/bin/copane
+    ~/.vim/plugged/copane/python/.venv/bin/python3 -m copane.app
 <
 
 7.4 Tmux pane not appearing ~
@@ -329,10 +489,10 @@ Check that tmux is running:
 
 Verify the pane name with debug info:
 >
-    :CopaneDebugInfo
+    :CopaneDebug
 <
 
-Check for "Tmux pane" and "Pane alive" lines.
+Check for "Stored pane ID" and "Pane exists" lines.
 
 7.5 Vim mappings not working ~
 
@@ -369,12 +529,7 @@ Enable verbose logging: >
 
 Then use:
 >
-    :CopaneDebugInfo
-<
-
-Or run the Python app directly with verbose output:
->
-    copane --verbose
+    :CopaneDebug
 <
 
 ==============================================================================
@@ -390,18 +545,35 @@ Or run the Python app directly with verbose output:
     │   └── copane.txt          # This help file
     ├── plugin/
     │   └── copane.vim          # Plugin init, commands, mappings
+    ├── ftplugin/
+    │   ├── python.vim          # Python-specific mappings
+    │   └── javascript.vim      # JavaScript/TypeScript-specific mappings
+    ├── after/
+    │   └── ftplugin/
+    │       └── python.vim      # Compatibility fixes for other plugins
+    ├── rplugin/
+    │   └── python3/
+    │       └── tmux_agent.py   # Neovim async remote plugin
     ├── python/
+    │   ├── pyproject.toml
+    │   ├── uv.lock
+    │   ├── .venv/              # Virtual environment
     │   └── src/
     │       └── copane/
     │           ├── __init__.py
-    │           ├── __main__.py      # Entry point
-    │           ├── app.py           # CLI, banner, main loop
-    │           ├── tmux_agent.py    # Agent, model switching, chat
-    │           ├── model_config.py  # Model registry, config file
-    │           └── panel_ui.py      # Terminal UI (Rich)
+    │           ├── app.py           # Main entry point, REPL loop
+    │           ├── cli.py           # Argument parsing, model listing
+    │           ├── ui.py            # Banner, streaming output
+    │           ├── tmux_agent.py    # Agent, model config, chat loop
+    │           ├── tools.py         # Agent function tools
+    │           ├── file_utils.py    # File completer, @file expansion
+    │           ├── term_styles.py   # ANSI colors, logo, print helpers
+    │           └── check_deps.py    # Dependency checker
+    ├── setup_python.sh         # Virtual environment bootstrap
+    ├── install.sh              # Standalone installer script
     ├── .env.example
-    ├── pyproject.toml
-    └── install.sh
+    ├── uninstall.sh
+    └── README.md
 <
 
 8.2 Setting Up for Development ~
@@ -409,10 +581,27 @@ Or run the Python app directly with verbose output:
 Clone and install in editable mode:
 >
     git clone https://github.com/MostafaKashwaa/copane.git
-    cd copane
-    python3 -m venv venv
-    source venv/bin/activate
+    cd copane/python
+    python3 -m venv .venv
+    source .venv/bin/activate
     pip install -e .
+<
+
+Or use uv (faster):
+>
+    cd copane/python
+    uv sync
+<
+
+Run the application:
+>
+    cd copane/python
+    python3 -m copane.app
+<
+
+Run the dependency checker:
+>
+    python3 python/src/copane/check_deps.py
 <
 
 8.3 Architecture ~
@@ -427,13 +616,16 @@ Key design decisions:
   - All AI logic, model config, and UI lives in Python
   - Environment file path is passed via --env-file argument
   - Model configuration lives in ~/.config/tmux-agent/ (persistent)
+  - Agent has tool access (read files, run commands, grep, etc.)
+  - Neovim has optional async remote plugin support (rplugin/)
+  - Tool calls and LLM responses are traced via langsmith
 
 8.4 Contributing ~
 
 1. Fork the repository
 2. Create a feature branch (git checkout -b feature/amazing)
 3. Make your changes
-4. Run the check script (python python/check_deps.py)
+4. Run the check script (python3 python/src/copane/check_deps.py)
 5. Commit your changes (git commit -am 'Add amazing feature')
 6. Push to the branch (git push origin feature/amazing)
 7. Open a Pull Request
