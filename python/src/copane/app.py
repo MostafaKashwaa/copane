@@ -13,6 +13,7 @@ from prompt_toolkit.history import FileHistory
 from dotenv import load_dotenv
 from prompt_toolkit.key_binding.key_bindings import KeyBindings
 
+from copane.tools import set_confirm_session
 from copane.cli import (
     APP_NAME,
     parse_args,
@@ -187,6 +188,7 @@ async def async_main():
         print_banner()
 
     session = create_prompt_session()
+    set_confirm_session(session)  # ← Wire up the session for write_file confirmation
 
     # Sentinel for external tools
     print("\033[s__COPANE_READY__\033[u", file=sys.stderr, flush=True)

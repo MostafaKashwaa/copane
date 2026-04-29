@@ -1,62 +1,302 @@
+"""Tool definitions for the copane AI coding assistant.
+
+Each tool is a @function_tool that the LLM can call during a conversation.
+Write confirmation uses an async prompt from prompt_toolkit for terminal safety.
+All tools return structured ToolResult objects for reliable LLM parsing.
+"""
+
 import os
+import re
+import difflib
 import subprocess
 from agents import function_tool
 from langsmith import traceable
+from pydantic import BaseModel
+import shlex
+
+
+# ---------------------------------------------------------------------------
+# Structured result model
+# ---------------------------------------------------------------------------
+
+
+class ToolResult(BaseModel):
+    """Structured return value for every tool.
+
+    The LLM can inspect ``.success`` directly rather than parsing text,
+    and uses ``.error_type`` to decide on a recovery strategy.
+    """
+
+    success: bool
+    """Whether the tool completed its intended operation."""
+
+    output: str = ""
+    """Main text output (file contents, command output, matches, …)."""
+
+    error: str = ""
+    """Human-readable error description (empty on success)."""
+
+    error_type: str = ""
+    """Machine-readable label such as ``"file_not_found"``, ``"timeout"``,
+    ``"blocked_command"``, ``"write_cancelled"``, etc."""
+
+    truncated: bool = False
+    """True when the output was clipped to fit the size limit."""
+
+    def __str__(self) -> str:
+        """Render as a compact text block the LLM can easily scan."""
+        if not self.success:
+            return f"[Error: {self.error_type}] {self.error}"
+        parts = [self.output]
+        if self.truncated:
+            parts.append("[output truncated]")
+        return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Write-confirmation session (set by app.py at startup)
+# ---------------------------------------------------------------------------
+
+_confirm_session = None
+
+
+def set_confirm_session(session):
+    """Store the prompt session for write confirmation prompts.
+
+    Called once during REPL initialisation in app.py.
+    """
+    global _confirm_session
+    _confirm_session = session
+
+
+# ---------------------------------------------------------------------------
+# Danger heuristics for shell commands
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_PATTERNS = [
+    re.compile(r'\brm\s+-rf\s+[/~]'),          # rm -rf /
+    re.compile(r'\bdd\s+if='),                  # dd if=/dev/zero
+    re.compile(r'>\s+/dev/'),                    # > /dev/sda
+    re.compile(r'\bmkfs\.'),                     # mkfs.ext4
+    re.compile(r':\(\)\s*\{'),                   # fork bomb
+    re.compile(r'\bchmod\s+-R\s+0{4}\b'),        # chmod -R 0000 /
+    re.compile(r'\bmv\s+[/~]\s+/dev/null\b'),    # mv / /dev/null
+]
+
+_MAX_OUTPUT = 8_000
+_MAX_GREP_OUTPUT = 5_000
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_dangerous(cmd: str) -> str | None:
+    """Return a description if *cmd* looks destructive, else ``None``."""
+    for pattern in _DANGEROUS_PATTERNS:
+        m = pattern.search(cmd.lower())
+        if m:
+            return m.group()
+    return None
+
+
+def _format_diff(path: str, new_content: str) -> str:
+    """Build a unified diff, or show full content for a new file."""
+    if os.path.exists(path):
+        with open(path) as f:
+            old_content = f.read()
+        diff = difflib.unified_diff(
+            old_content.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+        return "".join(diff)
+    return f"(new file)\n---\n{new_content}\n---"
+
+
+def _truncate(text: str, limit: int, label: str = "output") -> tuple[str, bool]:
+    """Truncate *text* to *limit* characters.
+
+    Returns ``(text, was_truncated)``.
+    """
+    if len(text) > limit:
+        return f"{text[:limit]}\n[... {label} truncated to {limit} chars]", True
+    return text, False
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
 
 
 @function_tool
 @traceable(run_type="tool", name="Read File")
 def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
     """Read a file or a line range from it. Use absolute or relative paths."""
-    with open(path) as f:
-        lines = f.readlines()
+    if not os.path.exists(path):
+        return str(ToolResult(
+            success=False,
+            error=f"File not found: {path}",
+            error_type="file_not_found",
+        ))
+
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError as e:
+        return str(ToolResult(
+            success=False,
+            error=str(e),
+            error_type="read_error",
+        ))
+
     if end_line <= 0:
         end_line = len(lines)
-    return "".join(lines[start_line - 1:end_line])
+    if start_line > len(lines):
+        return str(ToolResult(
+            success=False,
+            error=f"start_line {start_line} exceeds file length {len(lines)}",
+            error_type="invalid_range",
+        ))
+
+    return str(ToolResult(
+        success=True,
+        output="".join(lines[start_line - 1: end_line]),
+    ))
+
 
 @function_tool
 @traceable(run_type="tool", name="Run Command")
 def run_command(cmd: str) -> str:
-    """Run a shell command and return stdout+stderr. Use for tests, builds, git, etc."""
-    result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=30
-    )
+    """Run a shell command and return stdout+stderr.
+
+    Use for tests, builds, git, or any ad-hoc terminal task.
+    Commands matching known destructive patterns are blocked.
+    """
+    dangerous = _is_dangerous(cmd)
+    if dangerous:
+        return str(ToolResult(
+            success=False,
+            error=(
+                f"Command blocked — matched dangerous pattern {dangerous!r}. "
+                "If you believe this is a false positive, ask the user to "
+                "run it manually."
+            ),
+            error_type="blocked_command",
+        ))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return str(ToolResult(
+            success=False,
+            error="Command timed out after 30 seconds.",
+            error_type="timeout",
+        ))
+    except FileNotFoundError:
+        return str(ToolResult(
+            success=False,
+            error="Command not found.",
+            error_type="command_not_found",
+        ))
+    except OSError as e:
+        return str(ToolResult(
+            success=False,
+            error=str(e),
+            error_type="os_error",
+        ))
+
     output = result.stdout + result.stderr
-    return f"[exit code: {result.returncode}]\n{output[:8000]}"
+    body, truncated = _truncate(output, _MAX_OUTPUT, label="output")
+    return str(ToolResult(
+        success=result.returncode == 0,
+        output=f"[exit code: {result.returncode}]\n{body}",
+        error="" if result.returncode == 0 else output,
+        error_type="non_zero_exit" if result.returncode != 0 else "",
+        truncated=truncated,
+    ))
+
 
 @function_tool
 @traceable(run_type="tool", name="Grep Files")
 def grep_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
     """Search for a regex pattern across files. Returns matches with line numbers."""
-    result = subprocess.run(
-        f"grep -rn --include='{file_glob}' -E '{pattern}' '{path}'",
-        shell=True, capture_output=True, text=True, timeout=10
-    )
-    return result.stdout[:5000] or "No matches found."
+
+    safe_pattern = shlex.quote(pattern)
+    safe_path = shlex.quote(path)
+    safe_glob = shlex.quote(file_glob)
+
+    try:
+        result = subprocess.run(
+            f"grep -rn --include={safe_glob} -E {safe_pattern} {safe_path}",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return str(ToolResult(
+            success=False,
+            error="Grep timed out after 10 seconds.",
+            error_type="timeout",
+        ))
+    except OSError as e:
+        return str(ToolResult(
+            success=False,
+            error=str(e),
+            error_type="os_error",
+        ))
+
+    body = result.stdout
+    if not body.strip():
+        return str(ToolResult(
+            success=False,
+            error="No matches found.",
+            error_type="no_matches",
+        ))
+
+    body, truncated = _truncate(body, _MAX_GREP_OUTPUT, label="output")
+    return str(ToolResult(
+        success=True,
+        output=body,
+        truncated=truncated,
+    ))
+
 
 @function_tool
 @traceable(run_type="tool", name="List Files")
 def list_files(path: str = ".", depth: int = 2) -> str:
     """List directory structure up to a certain depth."""
-    result = subprocess.run(
-        f"find '{path}' -maxdepth {depth} -not -path '*/node_modules/*' "
-        f"-not -path '*/.git/*' -not -path '*/vendor/*' | head -200",
-        shell=True, capture_output=True, text=True
-    )
-    return result.stdout
 
-@function_tool
-@traceable(run_type="tool", name="Write File")
-def write_file(path: str, content: str) -> str:
-    """Write content to a file. Use when the user asks you to create or modify files."""
-    print(f"\n[write_file] {path} ({len(content)} chars)")
-    print("---\n" + content[:500] + "\n---")
-    confirm = input("Confirm write? (y/n): ").strip().lower()
-    if confirm != "y":
-        return "Write cancelled."
-    with open(path, "w") as f:
-        f.write(content)
-    return f"Wrote {len(content)} chars to {path}"
+    safe_path = shlex.quote(path)
+    try:
+        result = subprocess.run(
+            f"find {safe_path} -maxdepth {depth} "
+            "-not -path '*/node_modules/*' "
+            "-not -path '*/.git/*' "
+            "-not -path '*/vendor/*' | head -200",
+            shell=True,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as e:
+        return str(ToolResult(
+            success=False,
+            error=str(e),
+            error_type="os_error",
+        ))
+
+    return str(ToolResult(
+        success=True,
+        output=result.stdout or "(empty directory)",
+    ))
 
 @function_tool
 @traceable(run_type="tool", name="Get Current Directory")
@@ -65,3 +305,42 @@ def get_current_dir() -> str:
     return os.getcwd()
 
 
+@function_tool
+@traceable(run_type="tool", name="Write File")
+async def write_file(path: str, content: str) -> str:
+    """Write content to a file. Shows a diff preview and asks the user to confirm.
+
+    Supports *y* (yes), *n* (no), and *a* (always allow for the rest of
+    this session).
+    """
+    diff = _format_diff(path, content)
+    print(f"\n[write_file] {path} ({len(content)} chars)")
+    print(diff)
+    print()
+
+    global _confirm_session
+    if _confirm_session is not None:
+        confirm = await _confirm_session.prompt_async("Confirm write? (y/n/a): ")
+    else:
+        confirm = input("Confirm write? (y/n/a): ").strip().lower()
+
+    if confirm == "a":
+        with open(path, "w") as f:
+            f.write(content)
+        return str(ToolResult(
+            success=True,
+            output=f"Wrote {len(content)} chars to {path} (always-allowed for session)",
+        ))
+    if confirm == "y":
+        with open(path, "w") as f:
+            f.write(content)
+        return str(ToolResult(
+            success=True,
+            output=f"Wrote {len(content)} chars to {path}",
+        ))
+
+    return str(ToolResult(
+        success=False,
+        error="Write cancelled by user.",
+        error_type="write_cancelled",
+    ))
