@@ -40,10 +40,18 @@ class TestReadFile:
         path.write_text("")
         raw = await invoke(tools.read_file, path=str(path))
         result = parse_result(raw)
-        # read_file currently errors on empty files due to line-range logic
-        # (start_line=1 > len(lines)=0).
-        assert result.success is False
-        assert result.error_type == "invalid_range"
+        # Empty file with defaults (start_line=1, end_line=0) should succeed
+        # and return empty output. 
+        assert result.success is True
+        assert result.output == ""
+
+    async def test_empty_file_explicit_start_end(self, tmp_dir):
+        path = tmp_dir / "empty2.txt"
+        path.write_text("")
+        raw = await invoke(tools.read_file, path=str(path), start_line=1, end_line=1)
+        result = parse_result(raw)
+        assert result.success is True
+        assert result.output == ""
 
     async def test_binary_file(self, tmp_dir):
         path = tmp_dir / "binary.bin"
