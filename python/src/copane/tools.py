@@ -181,9 +181,20 @@ def read_file(
             error_type="read_error",
         ))
 
-    if end_line <= 0:
+    if start_line < 1 or end_line < 0:
+        return str(ToolResult(
+            success=False,
+            error="start_line must be >= 1 and end_line must be >= 0",
+            error_type="invalid_range",
+        ))
+
+    if end_line == 0:
         end_line = len(lines)
     if start_line > len(lines):
+        if len(lines) == 0:
+            # Empty file — reading with defaults (start_line=1, end_line=0/1)
+            # should succeed with empty output.
+            return str(ToolResult(success=True, output=""))
         return str(ToolResult(
             success=False,
             error=f"start_line {start_line} exceeds file length {len(lines)}",
@@ -275,7 +286,7 @@ def grep_files(
 
     try:
         result = subprocess.run(
-            f"grep -rn --include={safe_glob} -E {safe_pattern} {safe_path}",
+            f"grep -rn --include={safe_glob} -E -e {safe_pattern} -- {safe_path}",
             shell=True,
             capture_output=True,
             text=True,
@@ -397,7 +408,9 @@ async def write_file(
         # prompt, leading to overwritten / lost text in the scrollback.
         # from copane.tools import _get_confirm_prompt_session
         confirm_session = _get_confirm_prompt_session()
-        confirm = await confirm_session.prompt_async("Confirm write? (y/n/a): ")
+        confirm = (
+                await confirm_session.prompt_async("Confirm write? (y/n/a): ")
+                ).strip().lower()
     else:
         confirm = input("Confirm write? (y/n/a): ").strip().lower()
 
