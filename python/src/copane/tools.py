@@ -68,6 +68,34 @@ def set_confirm_session(session):
 
 
 # ---------------------------------------------------------------------------
+# Schema helpers
+# ---------------------------------------------------------------------------
+
+
+def _strip_config_from_schema(schema: dict) -> dict:
+    """Remove the ``config`` property that ``@traceable`` injects into
+    function signatures.
+
+    ``@langsmith.traceable`` adds a keyword-only ``config`` parameter to
+    every wrapped function.  When ``@function_tool`` subsequently builds
+    a JSON schema from that signature, the ``config`` parameter ends up
+    as a property with **no ``type`` key**, which is invalid for OpenAI's
+    API (OpenAI requires every property to have a ``type``).  Removing it
+    from the schema fixes the 400 error for OpenAI-based models.
+
+    This function mutates the schema *in-place* for simplicity and also
+    returns it.
+    """
+    props = schema.get("properties", {})
+    if "config" in props:
+        del props["config"]
+    required = schema.get("required", [])
+    if "config" in required:
+        required.remove("config")
+    return schema
+
+
+# ---------------------------------------------------------------------------
 # Danger heuristics for shell commands
 # ---------------------------------------------------------------------------
 
@@ -167,6 +195,9 @@ def read_file(
         output="".join(lines[start_line - 1: end_line]),
     ))
 
+# Strip the spurious "config" property injected by @traceable
+_strip_config_from_schema(read_file.params_json_schema)
+
 
 @function_tool
 @traceable(run_type="tool", name="Run Command")
@@ -227,6 +258,8 @@ def run_command(
         truncated=truncated,
     ))
 
+_strip_config_from_schema(run_command.params_json_schema)
+
 
 @function_tool
 @traceable(run_type="tool", name="Grep Files")
@@ -276,6 +309,8 @@ def grep_files(
         truncated=truncated,
     ))
 
+_strip_config_from_schema(grep_files.params_json_schema)
+
 
 @function_tool
 @traceable(run_type="tool", name="List Files")
@@ -315,6 +350,8 @@ def list_files(
         output=result.stdout or "(empty directory)",
     ))
 
+_strip_config_from_schema(list_files.params_json_schema)
+
 
 @function_tool
 @traceable(run_type="tool", name="Get Current Directory")
@@ -324,6 +361,8 @@ def get_current_dir() -> str:
         success=True,
         output=os.getcwd(),
     ))
+
+_strip_config_from_schema(get_current_dir.params_json_schema)
 
 
 @function_tool
@@ -356,7 +395,7 @@ async def write_file(
         # Those settings cause prompt_toolkit to manipulate the terminal in
         # ways that corrupt the streamed LLM output displayed above the
         # prompt, leading to overwritten / lost text in the scrollback.
-        from copane.tools import _get_confirm_prompt_session
+        # from copane.tools import _get_confirm_prompt_session
         confirm_session = _get_confirm_prompt_session()
         confirm = await confirm_session.prompt_async("Confirm write? (y/n/a): ")
     else:
@@ -380,6 +419,8 @@ async def write_file(
         error="Write cancelled by user.",
         error_type="write_cancelled",
     ))
+
+_strip_config_from_schema(write_file.params_json_schema)
 
 
 # ---------------------------------------------------------------------------
