@@ -686,6 +686,16 @@ class TestEdgeCases:
 class TestToolSchema:
     """Ensure each tool exposes valid JSON schema via the agents SDK."""
 
+    # List of all tool names to test — keep in sync with copane/tools.py
+    _ALL_TOOLS = [
+        "read_file",
+        "run_command",
+        "grep_files",
+        "list_files",
+        "get_current_dir",
+        "write_file",
+    ]
+
     def test_read_file_schema(self):
         schema = tools.read_file.params_json_schema
         assert "path" in schema["required"]
@@ -721,17 +731,26 @@ class TestToolSchema:
         assert "content" in schema["required"]
 
     def test_all_tools_have_description(self):
-        for name in ("read_file", "run_command", "grep_files", "list_files", "get_current_dir", "write_file"):
+        for name in self._ALL_TOOLS:
             tool = getattr(tools, name)
             assert tool.description, f"{name} is missing a description"
 
     def test_all_tools_have_unique_names(self):
-        names = [
-            tools.read_file.name,
-            tools.run_command.name,
-            tools.grep_files.name,
-            tools.list_files.name,
-            tools.get_current_dir.name,
-            tools.write_file.name,
-        ]
+        names = [getattr(tools, name).name for name in self._ALL_TOOLS]
         assert len(names) == len(set(names)), "Tool names must be unique"
+
+    def test_no_tool_has_config_in_schema(self):
+        """No tool schema should expose a ``config`` property.
+
+        The ``@traceable`` decorator from LangSmith adds a ``config``
+        parameter to every decorated function's signature. If this leaks
+        into the JSON schema, OpenAI rejects it with a 400 error
+        because the property lacks a ``type`` key.
+        """
+        for name in self._ALL_TOOLS:
+            tool = getattr(tools, name)
+            properties = tool.params_json_schema.get("properties", {})
+            assert "config" not in properties, (
+                f"{name}.params_json_schema contains 'config' — "
+                "it must be stripped to avoid OpenAI schema rejection"
+            )
