@@ -9,9 +9,10 @@ import os
 import re
 import difflib
 import subprocess
+from typing import Annotated
 from agents import function_tool
 from langsmith import traceable
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import shlex
 
 
@@ -27,21 +28,17 @@ class ToolResult(BaseModel):
     and uses ``.error_type`` to decide on a recovery strategy.
     """
 
-    success: bool
-    """Whether the tool completed its intended operation."""
-
-    output: str = ""
-    """Main text output (file contents, command output, matches, …)."""
-
-    error: str = ""
-    """Human-readable error description (empty on success)."""
-
-    error_type: str = ""
-    """Machine-readable label such as ``"file_not_found"``, ``"timeout"``,
-    ``"blocked_command"``, ``"write_cancelled"``, etc."""
-
-    truncated: bool = False
-    """True when the output was clipped to fit the size limit."""
+    success: bool = Field(description="Whether the tool completed its intended operation.")
+    output: str = Field(default="", description="Main text output (file contents, command output, matches, …).")
+    error: str = Field(default="", description="Human-readable error description (empty on success).")
+    error_type: str = Field(
+        default="",
+        description=(
+            "Machine-readable label such as ``'file_not_found'``, ``'timeout'``, "
+            "``'blocked_command'``, ``'write_cancelled'``, etc."
+        ),
+    )
+    truncated: bool = Field(default=False, description="True when the output was clipped to fit the size limit.")
 
     def __str__(self) -> str:
         """Render as a compact text block the LLM can easily scan."""
@@ -132,7 +129,11 @@ def _truncate(text: str, limit: int, label: str = "output") -> tuple[str, bool]:
 
 @function_tool
 @traceable(run_type="tool", name="Read File")
-def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
+def read_file(
+    path: Annotated[str, Field(description="Absolute or relative path to the file to read")],
+    start_line: Annotated[int, Field(description="First line number to read (1-indexed)")] = 1,
+    end_line: Annotated[int, Field(description="Last line number to read (0 means read to end of file)")] = 0,
+) -> str:
     """Read a file or a line range from it. Use absolute or relative paths."""
     if not os.path.exists(path):
         return str(ToolResult(
@@ -168,7 +169,9 @@ def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
 
 @function_tool
 @traceable(run_type="tool", name="Run Command")
-def run_command(cmd: str) -> str:
+def run_command(
+    cmd: Annotated[str, Field(description="Shell command to execute (destructive patterns are blocked)")],
+) -> str:
     """Run a shell command and return stdout+stderr.
 
     Use for tests, builds, git, or any ad-hoc terminal task.
@@ -226,9 +229,12 @@ def run_command(cmd: str) -> str:
 
 @function_tool
 @traceable(run_type="tool", name="Grep Files")
-def grep_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
+def grep_files(
+    pattern: Annotated[str, Field(description="Regular expression pattern to search for")],
+    path: Annotated[str, Field(description="Directory or file path to search in")] = ".",
+    file_glob: Annotated[str, Field(description="Glob pattern to filter files (e.g. '*.py', '*.md')")] = "*",
+) -> str:
     """Search for a regex pattern across files. Returns matches with line numbers."""
-
     safe_pattern = shlex.quote(pattern)
     safe_path = shlex.quote(path)
     safe_glob = shlex.quote(file_glob)
@@ -272,9 +278,11 @@ def grep_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
 
 @function_tool
 @traceable(run_type="tool", name="List Files")
-def list_files(path: str = ".", depth: int = 2) -> str:
+def list_files(
+    path: Annotated[str, Field(description="Directory path to list")] = ".",
+    depth: Annotated[int, Field(description="Maximum depth of directory traversal")] = 2,
+) -> str:
     """List directory structure up to a certain depth."""
-
     safe_path = shlex.quote(path)
     try:
         result = subprocess.run(
@@ -298,16 +306,23 @@ def list_files(path: str = ".", depth: int = 2) -> str:
         output=result.stdout or "(empty directory)",
     ))
 
+
 @function_tool
 @traceable(run_type="tool", name="Get Current Directory")
 def get_current_dir() -> str:
     """Return the current working directory."""
-    return os.getcwd()
+    return str(ToolResult(
+        success=True,
+        output=os.getcwd(),
+    ))
 
 
 @function_tool
 @traceable(run_type="tool", name="Write File")
-async def write_file(path: str, content: str) -> str:
+async def write_file(
+    path: Annotated[str, Field(description="Absolute or relative path of the file to write")],
+    content: Annotated[str, Field(description="Full text content to write to the file")],
+) -> str:
     """Write content to a file. Shows a diff preview and asks the user to confirm.
 
     Supports *y* (yes), *n* (no), and *a* (always allow for the rest of
