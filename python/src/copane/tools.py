@@ -7,6 +7,7 @@ All tools return structured ToolResult objects for reliable LLM parsing.
 
 import os
 import re
+import sys
 import difflib
 import subprocess
 from typing import Annotated
@@ -71,13 +72,13 @@ def set_confirm_session(session):
 # ---------------------------------------------------------------------------
 
 _DANGEROUS_PATTERNS = [
-    re.compile(r'\brm\s+-rf\s+[/~]'),          # rm -rf /
-    re.compile(r'\bdd\s+if='),                  # dd if=/dev/zero
-    re.compile(r'>\s+/dev/'),                    # > /dev/sda
-    re.compile(r'\bmkfs\.'),                     # mkfs.ext4
-    re.compile(r':\(\)\s*\{'),                   # fork bomb
-    re.compile(r'\bchmod\s+-R\s+0{4}\b'),        # chmod -R 0000 /
-    re.compile(r'\bmv\s+[/~]\s+/dev/null\b'),    # mv / /dev/null
+    re.compile(r'\brm\s+-rf\s+[/~]', re.IGNORECASE),          # rm -rf /
+    re.compile(r'\bdd\s+if=', re.IGNORECASE),                  # dd if=/dev/zero
+    re.compile(r'>\s+/dev/', re.IGNORECASE),                    # > /dev/sda
+    re.compile(r'\bmkfs\.', re.IGNORECASE),                     # mkfs.ext4
+    re.compile(r':\(\)\s*\{'),                                   # fork bomb
+    re.compile(r'\bchmod\s+-R\s+0{4}\b', re.IGNORECASE),        # chmod -R 0000 /
+    re.compile(r'\bmv\s+[/~]\s+/dev/null\b', re.IGNORECASE),    # mv / /dev/null
 ]
 
 _MAX_OUTPUT = 8_000
@@ -91,7 +92,7 @@ _MAX_GREP_OUTPUT = 5_000
 def _is_dangerous(cmd: str) -> str | None:
     """Return a description if *cmd* looks destructive, else ``None``."""
     for pattern in _DANGEROUS_PATTERNS:
-        m = pattern.search(cmd.lower())
+        m = pattern.search(cmd)
         if m:
             return m.group()
     return None
@@ -283,6 +284,14 @@ def list_files(
     depth: Annotated[int, Field(description="Maximum depth of directory traversal")] = 2,
 ) -> str:
     """List directory structure up to a certain depth."""
+    # Validate the path exists early — find(1) exits 0 even for nonexistent paths
+    if not os.path.exists(path):
+        return str(ToolResult(
+            success=False,
+            error=f"Path not found: {path}",
+            error_type="file_not_found",
+        ))
+
     safe_path = shlex.quote(path)
     try:
         result = subprocess.run(
@@ -329,29 +338,41 @@ async def write_file(
     this session).
     """
     diff = _format_diff(path, content)
-    print(f"\n[write_file] {path} ({len(content)} chars)")
-    print(diff)
-    print()
+
+    # Write the diff to stderr so it doesn't interleave with the LLM's
+    # streamed text on stdout.  Also emit a visual separator so the
+    # confirmation request stands out clearly.
+    print(f"\n{'-'*60}", file=sys.stderr)
+    print(f"[write_file] {path} ({len(content)} chars)", file=sys.stderr)
+    print("-" * 60, file=sys.stderr)
+    print(diff, file=sys.stderr)
+    print("-" * 60, file=sys.stderr)
 
     global _confirm_session
     if _confirm_session is not None:
-        confirm = await _confirm_session.prompt_async("Confirm write? (y/n/a): ")
+        # Use the dedicated confirmation session rather than the main REPL
+        # session.  The REPL session has multiline=True, mouse_support=True,
+        # and a file completer – all inappropriate for a simple y/n prompt.
+        # Those settings cause prompt_toolkit to manipulate the terminal in
+        # ways that corrupt the streamed LLM output displayed above the
+        # prompt, leading to overwritten / lost text in the scrollback.
+        from copane.tools import _get_confirm_prompt_session
+        confirm_session = _get_confirm_prompt_session()
+        confirm = await confirm_session.prompt_async("Confirm write? (y/n/a): ")
     else:
         confirm = input("Confirm write? (y/n/a): ").strip().lower()
 
-    if confirm == "a":
+    if confirm in ("y", "a"):
+        # Create parent directories if they don't exist
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w") as f:
             f.write(content)
+        suffix = " (always-allowed for session)" if confirm == "a" else ""
         return str(ToolResult(
             success=True,
-            output=f"Wrote {len(content)} chars to {path} (always-allowed for session)",
-        ))
-    if confirm == "y":
-        with open(path, "w") as f:
-            f.write(content)
-        return str(ToolResult(
-            success=True,
-            output=f"Wrote {len(content)} chars to {path}",
+            output=f"Wrote {len(content)} chars to {path}{suffix}",
         ))
 
     return str(ToolResult(
@@ -359,3 +380,31 @@ async def write_file(
         error="Write cancelled by user.",
         error_type="write_cancelled",
     ))
+
+
+# ---------------------------------------------------------------------------
+# Dedicated confirmation prompt session (lazily created)
+# ---------------------------------------------------------------------------
+
+_confirm_prompt_session = None
+
+
+def _get_confirm_prompt_session():
+    """Return a minimal PromptSession suitable for y/n confirmations.
+
+    This session deliberately avoids multiline, mouse support, file
+    completion, and custom key bindings – it's a plain single-line
+    prompt where Enter submits.  Using the main REPL session
+    (which has multiline=True, mouse_support=True, etc.) during
+    streaming corrupts the terminal state and causes the LLM's
+    streamed text to be overwritten.
+    """
+    global _confirm_prompt_session
+    if _confirm_prompt_session is None:
+        from prompt_toolkit import PromptSession
+        _confirm_prompt_session = PromptSession(
+            multiline=False,
+            mouse_support=False,
+            complete_while_typing=False,
+        )
+    return _confirm_prompt_session
