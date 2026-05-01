@@ -194,6 +194,9 @@ def print_info(message, sign=f'{INFO_GLYPH} '):
     """Print an info message."""
     print(get_info_message(message, sign))
 
+def get_dim(message):
+    """Return a dimmed message string with ANSI color codes."""
+    return f"{Colors.DIM}{message}{Colors.RESET}"
 
 def print_dim(message):
     """Print a dimmed message."""
