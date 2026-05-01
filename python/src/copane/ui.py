@@ -15,6 +15,7 @@ from copane.term_styles import (
     LOGO_ONELINER,
     get_bold,
     get_colored,
+    get_dim,
     get_success_message,
     get_warning_message,
     print_bold,
@@ -153,18 +154,35 @@ async def print_streamed_response(stream_generator):
     agent = get_agent()
     print(f"\n{THINKING_DOTS}", end="", flush=True)
 
+    # Track the actual plain-text length (without ANSI codes) for the summary
+    plain_text_len = 0
+
     try:
-        text = ""
-        async for chunk in stream_generator:
-            print(chunk, end="", flush=True)
-            text += chunk
+        async for kind, chunk in stream_generator:
+            if kind == 'thinking':
+                print(get_dim(chunk), end="", flush=True)
+            elif kind == 'tool_call':
+                print(
+                    f"\n{get_colored(f'🔧 [{chunk}]', Colors.ACCENT)}",
+                    end="", flush=True,
+                )
+            elif kind == 'tool_response':
+                continue
+                # truncated = len(chunk) > 150
+                # if truncated:
+                #     chunk = f'{chunk[:150]}\n  └─ … (output truncated)'
+                # print(get_dim(chunk), end="", flush=True)
+            else:  # 'text'
+                print(chunk, end="", flush=True)
+                plain_text_len += len(chunk)
+
         print("\n", flush=True)
         print_row(
             ("", "", f"({agent.get_message_count()}) message/s in history"),
             colors=[Colors.RESET, Colors.RESET, Colors.INFO],
             column_sizes=[0, 7, 0],
         )
-        print_success(f"Response complete ({len(text)} chars)")
+        print_success(f"Response complete ({plain_text_len} chars)")
 
     except KeyboardInterrupt:
         print_warning("\n\n[Interrupted]\n", "")
