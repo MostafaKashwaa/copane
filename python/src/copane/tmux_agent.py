@@ -9,9 +9,9 @@ import json
 from pathlib import Path
 from typing import Dict, Any
 
-from agents import Agent, OpenAIChatCompletionsModel, RawResponsesStreamEvent, Tool, Runner
+from agents import Agent, OpenAIChatCompletionsModel, RawResponsesStreamEvent, RunItemStreamEvent, Tool, Runner
 from openai import AsyncOpenAI
-from openai.types.responses import ResponseTextDeltaEvent
+from openai.types.responses import ResponseReasoningTextDeltaEvent, ResponseTextDeltaEvent
 
 from langsmith import traceable
 
@@ -282,13 +282,31 @@ If asked to modify code, show the diff or write the file directly.
             max_turns=50
         )
 
+        thinking_response = ""
         text_response = ""
         async for event in response.stream_events():
             if isinstance(event, RawResponsesStreamEvent):
-                if isinstance(event.data, ResponseTextDeltaEvent):
+                if isinstance(event.data, ResponseReasoningTextDeltaEvent):
+                    delta = event.data.delta or ""
+                    thinking_response += delta
+                    yield ('thinking', delta)
+                elif isinstance(event.data, ResponseTextDeltaEvent):
                     delta = event.data.delta or ""
                     text_response += delta
-                    yield delta
+                    yield ('text', delta)
+            elif isinstance(event, RunItemStreamEvent):
+                if event.name == "tool_called":
+                    tool_name = event.item.raw_item.name
+                    yield ('tool_call', tool_name)
+                elif event.name == "tool_output":
+                    yield ('tool_response', event.item.output)
+
+        if thinking_response:
+            self.messages.append({
+                'id': '__fake_id__',
+                'type': 'reasoning',
+                'summary': [{'text': thinking_response, 'type': 'summary_text'}]
+                })
 
         self.add_message("assistant", text_response)
 
