@@ -20,19 +20,19 @@ from copane.term_styles import (
     get_warning_message,
     print_bold,
     print_colored,
-    print_dim,
     print_success,
     print_error,
     print_warning,
-    print_info,
     print_row,
     print_tuble,
-    print_section_header,
-    SEPARATOR,
     DOUBLE_SEPARATOR,
     STAR,
     BULLET,
 )
+from copane.preview import format_tool_preview
+from prompt_toolkit import PromptSession
+
+from copane.tools import ToolResult
 
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -44,6 +44,44 @@ LOGO_DISPLAY = get_bold(LOGO, Colors.PRIMARY)
 
 # Colours used by the streamed response
 THINKING_DOTS = f"{Colors.INFO}Thinking{Colors.RESET}"
+
+
+# ── Tool approval prompt session  ─────────────────────────────────────
+
+_approval_prompt_session: PromptSession | None = None
+
+
+def _get_approval_prompt_session() -> PromptSession:
+    """Return a minimal PromptSession for yes/no approval prompts.
+
+    Avoids multiline, mouse support, and file completion — just a
+    simple single-line prompt that Enter submits.
+    """
+    global _approval_prompt_session
+    if _approval_prompt_session is None:
+        _approval_prompt_session = PromptSession(
+            multiline=False,
+            mouse_support=False,
+            complete_while_typing=False,
+        )
+    return _approval_prompt_session
+
+
+async def _approval_prompt() -> str:
+    """Ask the user to approve or reject a tool call.
+
+    Returns one of: 'y', 'n', 'a', 'r', 'q'.
+    """
+    session = _get_approval_prompt_session()
+    while True:
+        answer = (
+            await session.prompt_async(
+                "Approve? (y)es / (n)o / (a)lways / neve(r) / (q)uit: "
+            )
+        ).strip().lower()
+        if answer in ('y', 'n', 'a', 'r', 'q'):
+            return answer
+        print("  Invalid choice. Try again.", file=sys.stderr, flush=True)
 
 
 # ── Banners ─────────────────────────────────────────────────────────────
@@ -96,10 +134,12 @@ def print_banner():
 
     api_parts = []
     api_parts.append(
-        get_success_message("DeepSeek") if deepseek_key else get_warning_message("DeepSeek")
+        get_success_message(
+            "DeepSeek") if deepseek_key else get_warning_message("DeepSeek")
     )
     api_parts.append(
-        get_success_message("OpenAI") if openai_key else get_warning_message("OpenAI")
+        get_success_message(
+            "OpenAI") if openai_key else get_warning_message("OpenAI")
     )
 
     print_row(
@@ -144,6 +184,43 @@ def print_no_banner():
     print_success(f"{APP_NAME} ready. Ask away!\n", f"{STAR} ")
 
 
+# # ── Tool output helpers ────────────────────────────────────────────────
+
+def _format_tool_output(res: ToolResult) -> str:
+    """Return a compact one-liner status icon + first-line preview.
+
+    The result always starts with `` ✓`` (success) or `` ✗`` (failure).
+    """
+    if isinstance(res, str):
+        # Legacy support for tools that return raw strings instead of ToolResult
+        output = res.strip()
+        if output.startswith("[Error:") or output.startswith("[exit code:"):
+            line0 = output.splitlines()[0] if output else ""
+            return f" ✗ {line0} "
+        elif output.startswith("[exit code: 0]"):
+            line0 = output.splitlines()[0] if output else ""
+            return f" ✓ {line0} "
+        elif output.startswith("Wrote "):
+            return f" ✓ ({output})"
+        elif output:
+            line0 = output.splitlines()[0]
+            return f" ✓ {line0} "
+        else:
+            return " ✓ "
+    if res.success:
+        if res.output.strip():
+            line0 = res.output.splitlines()[0]
+            return f" ✓ {line0} "
+        else:
+            return " ✓ "
+    else:
+        if res.output.strip():
+            line0 = res.output.splitlines()[0]
+            return f" ✗ {line0} "
+        else:
+            return " ✗ "
+
+
 # ── Streaming output ────────────────────────────────────────────────────
 
 async def print_streamed_response(stream_generator):
@@ -152,29 +229,56 @@ async def print_streamed_response(stream_generator):
     Handles KeyboardInterrupt and general exceptions gracefully.
     """
     agent = get_agent()
-    print(f"\n{THINKING_DOTS}", end="", flush=True)
+    print(f"\n{THINKING_DOTS}", end="\n", flush=True)
 
     # Track the actual plain-text length (without ANSI codes) for the summary
     plain_text_len = 0
 
     try:
         async for kind, chunk in stream_generator:
-            if kind == 'thinking':
-                print(get_dim(chunk), end="", flush=True)
-            elif kind == 'tool_call':
-                print(
-                    f"\n{get_colored(f'🔧 [{chunk}]', Colors.ACCENT)}",
-                    end="", flush=True,
-                )
-            elif kind == 'tool_response':
-                continue
-                # truncated = len(chunk) > 150
-                # if truncated:
-                #     chunk = f'{chunk[:150]}\n  └─ … (output truncated)'
-                # print(get_dim(chunk), end="", flush=True)
-            else:  # 'text'
-                print(chunk, end="", flush=True)
-                plain_text_len += len(chunk)
+            match kind:
+                case 'thinking':
+                    print(get_dim(chunk), end="", flush=True)
+                    plain_text_len += len(chunk)
+                case 'tool_call':
+                    print(
+                        f"\n{get_colored(f'🔧 [{chunk}]', Colors.ACCENT)}",
+                        end=" ", flush=True,
+                    )
+                    # approximate: icon + brackets
+                    plain_text_len += len(chunk) + 5
+                case 'tool_response':
+                    result = _format_tool_output(chunk)
+                    if isinstance(chunk, ToolResult):
+                        color = Colors.SUCCESS if chunk.success else Colors.ERROR
+                        plain_text_len += len(chunk.output)
+                    else:
+                        color = Colors.INFO
+                        plain_text_len += len(chunk)
+                    print(f"{get_colored(result.strip(), color)}",
+                          end=" ", flush=True)
+                case 'tool_approval':
+                    item, state = chunk
+                    tool_name = item.tool_name or 'unknown tool'
+
+                    preview = format_tool_preview(item)
+                    print(f"\n{get_colored(f'─' * 60, Colors.WARNING)}")
+                    print(
+                        f"{get_colored(f'⚠ Approval needed: {tool_name}', Colors.WARNING)}")
+                    print(f"{get_colored(f'─' * 60, Colors.WARNING)}")
+                    print(preview, end="", flush=True)
+                    print(f"\n{get_colored(f'─' * 60, Colors.WARNING)}")
+
+                    decision = await _approval_prompt()
+
+                    if decision == 'q':
+                        print_warning("\n[Response cancelled by user]\n")
+                        return
+
+                    agent.handle_tool_approval(item, decision, state)
+                case _:
+                    print(chunk, end="", flush=True)
+                    plain_text_len += len(chunk)
 
         print("\n", flush=True)
         print_row(

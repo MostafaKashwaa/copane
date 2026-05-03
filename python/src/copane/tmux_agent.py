@@ -4,14 +4,16 @@ tmux-agent: AI agent configuration for terminal-based coding assistance.
 Enhanced with professional model selection and configuration management.
 """
 
+import logging
 import os
 import json
+import sys
 from pathlib import Path
 from typing import Dict, Any
 
-from agents import Agent, OpenAIChatCompletionsModel, RawResponsesStreamEvent, RunItemStreamEvent, Tool, Runner
+from agents import Agent, OpenAIChatCompletionsModel, RawResponsesStreamEvent, RunItemStreamEvent, RunState, Tool, Runner, ToolApprovalItem
 from openai import AsyncOpenAI
-from openai.types.responses import ResponseReasoningTextDeltaEvent, ResponseTextDeltaEvent
+from openai.types.responses import ResponseReasoningSummaryTextDeltaEvent, ResponseReasoningTextDeltaEvent, ResponseTextDeltaEvent
 
 from langsmith import traceable
 
@@ -23,6 +25,21 @@ from copane.tools import (
     write_file,
     get_current_dir
 )
+
+# ---------------------------------------------------------------------------
+# Memory safety limits
+# ---------------------------------------------------------------------------
+
+# Maximum number of messages to retain in conversation history.
+# Each turn adds 2-3 messages (user, optional reasoning, assistant).
+# At 100 messages ≈ 33-50 turns, which is plenty for context while
+# keeping memory under ~10 MB for text alone.  Tool outputs stored
+# inside RunState are separate and bounded by max_turns per run.
+MAX_MESSAGES = 100
+
+# When we exceed MAX_MESSAGES we trim back to this fraction of MAX
+# so we don't trim on every single add_message call.
+TRIM_TARGET_FRACTION = 0.75
 
 
 class ModelConfig:
@@ -120,7 +137,7 @@ class TmuxAgent:
 
     def __init__(self, name):
         self.name = name
-        self.messages = []
+        self.messages: list[dict] = []
         self.agent: Agent | None = None
         self.tools: list[Tool] = [
             read_file,
@@ -131,6 +148,49 @@ class TmuxAgent:
             get_current_dir
         ]
         self.model_config = ModelConfig()
+        self._trim_warned = False  # only warn once about trimming
+
+    # ── Message / memory management ─────────────────────────────────
+
+    def _trim_messages(self):
+        """Trim old messages when we exceed MAX_MESSAGES.
+
+        Trims back to TRIM_TARGET_FRACTION of MAX so we don't trim on
+        every single add_message call.  Warns once the first time
+        trimming occurs.
+        """
+        if len(self.messages) <= MAX_MESSAGES:
+            return
+
+        if not self._trim_warned:
+            print(
+                f"\n⚠ [copane] Message history full ({len(self.messages)}). "
+                f"Trimming oldest messages to conserve memory. "
+                f"Use /clear to reset.\n",
+                file=sys.stderr, flush=True,
+            )
+            self._trim_warned = True
+
+        target = int(MAX_MESSAGES * TRIM_TARGET_FRACTION)
+        trimmed = len(self.messages) - target
+        self.messages = self.messages[trimmed:]
+
+    def _estimate_memory_mb(self) -> float:
+        """Rough estimate of memory used by self.messages (MB)."""
+        try:
+            total = sum(
+                len(str(m.get("content", ""))) for m in self.messages
+            )
+            for m in self.messages:
+                if m.get("type") == "reasoning":
+                    for s in m.get("summary", []):
+                        total += len(str(s.get("text", "")))
+            return total / (1024 * 1024)
+        except (TypeError, AttributeError, KeyError):
+            logging.warning("Failed to estimate memory usage of messages")
+            return 0.0
+
+    # ── Model management ────────────────────────────────────────────
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the current model."""
@@ -153,8 +213,22 @@ class TmuxAgent:
         env_key = model_info.get("env_key", "")
 
         if model_info.get("type") == "local":
-            # For local models, we just check if the base URL is accessible
-            return "available" if model_info.get("base_url") else "unavailable"
+            # Check if the local model's base URL is reachable (basic check for local availability)
+            ollama_url = model_info.get("base_url")
+            if ollama_url:
+                try:
+                    import httpx
+                    response = httpx.get(ollama_url + "/models", timeout=2)
+                    if response.status_code == 200:
+                        return "available"
+                    else:
+                        return "unreachable (try running 'ollama serve' or correcting base_url)"
+                except Exception:
+                    return "unreachable"
+            else:
+                return "unavailable (local model missing base_url)"
+
+            # return "available" # if model_info.get("base_url") else "unavailable"
 
         if env_key:
             api_key = os.getenv(env_key)
@@ -190,7 +264,6 @@ class TmuxAgent:
                 f"Model '{model_key}' not found. Available models: {list(models.keys())}")
 
         self.model_config.set_selected_model(model_key)
-        # Reset the agent to use the new model
         self.agent = None
 
     @traceable(name="Change Mode")
@@ -229,7 +302,7 @@ class TmuxAgent:
         elif model_type == "local":
             client = AsyncOpenAI(
                 base_url=base_url,
-                api_key="",  # No API key needed for local Ollama
+                api_key="",
             )
             model = OpenAIChatCompletionsModel(
                 model=model_name,
@@ -245,12 +318,17 @@ class TmuxAgent:
 You are a coding assistant running inside a tmux pane.
 The user will send you code snippets or questions from their editor.
 You have tools to read files, run commands, and search code.
-Use them proactively — don't just answer from the snippet alone.
+Tool outputs are JSON objects with a `success` boolean, an output string, an error_type string or null, 
+and a `truncated` boolean indicates wheather the ouput is truncated.
+Use the tools proactively — don't just answer from the snippet alone.
+Before calling a tool, briefly say what you're about to do and why, in one natural sentence.
 Read surrounding context, check imports, run tests, check git history
 if it helps you give a better answer.
 
 Be concise. Code first, explanation after.
 If asked to modify code, show the diff or write the file directly.
+If the you tried a tool that makes changes and needs approval, and the changes were not approved, do not retry, instead
+ask the user about the reason for the rejection and how to proceed.
 """,
             tools=self.tools,
             model=model,
@@ -259,16 +337,51 @@ If asked to modify code, show the diff or write the file directly.
     def add_message(self, role: str, content: str):
         """Add a message to the conversation history."""
         self.messages.append({"role": role, "content": content})
+        self._trim_messages()
 
     def clear_messages(self):
         """Clear the conversation history."""
         self.messages = []
+        self._trim_warned = False
 
     def get_message_count(self) -> int:
         """Get the number of messages in the conversation history."""
-        return len(self.messages)//2  # Each turn has a user and assistant message
+        # Each turn typically consists of a user message, an optional reasoning message, and an assistant message.
+        # We extract exactly the user and assistant messages for a more accurate turn count, ignoring reasoning messages.
+        return sum(1 for m in self.messages if m.get("role") in ("user", "assistant"))
 
-    @traceable(run_type='llm', name="Stream Response")
+    def save_conversation(self, file_path: str):
+        """Save the conversation history to a file."""
+        with open(file_path, 'w') as f:
+            json.dump(self.messages, f, indent=2)
+
+    def handle_tool_approval(self, item: ToolApprovalItem, decision: str, state: RunState):
+        """Approve or reject a tool call."""
+        match decision:
+            case 'y':
+                state.approve(item)
+            case 'n':
+                state.reject(
+                    item, rejection_message="User rejected this tool call. If you can't proceed without this tool call, stop trying and ask the user how to proceed.")
+            case 'a':
+                state.approve(item, always_approve=True)
+            case 'r':
+                state.reject(item, always_reject=True,
+                             rejection_message="User rejected this tool call and all future calls to this tool. If you can't proceed without this tool call, stop trying and ask the user how to proceed.")
+            case 'q':
+                raise KeyboardInterrupt(
+                    "Tool approval process interrupted by user.")
+            case _:
+                raise ValueError(
+                    f"Invalid decision: {decision}. Must be one of 'y', 'n', 'a', 'r', or 'q'.")
+
+    # ── Streaming response ──────────────────────────────────────────
+
+    # NOTE: @traceable is intentionally NOT used on stream_response.
+    # The decorator wraps the entire async generator, which can live for
+    # many minutes across multiple tool-approval rounds.  LangSmith
+    # tracing would accumulate trace blobs in memory for the lifetime
+    # of the generator.
     async def stream_response(self, user_input: str):
         """Get a response from the agent based on user input."""
         if not self.agent:
@@ -284,35 +397,71 @@ If asked to modify code, show the diff or write the file directly.
 
         thinking_response = ""
         text_response = ""
-        async for event in response.stream_events():
-            if isinstance(event, RawResponsesStreamEvent):
-                if isinstance(event.data, ResponseReasoningTextDeltaEvent):
-                    delta = event.data.delta or ""
-                    thinking_response += delta
-                    yield ('thinking', delta)
-                elif isinstance(event.data, ResponseTextDeltaEvent):
-                    delta = event.data.delta or ""
-                    text_response += delta
-                    yield ('text', delta)
-            elif isinstance(event, RunItemStreamEvent):
-                if event.name == "tool_called":
-                    tool_name = event.item.raw_item.name
-                    yield ('tool_call', tool_name)
-                elif event.name == "tool_output":
-                    yield ('tool_response', event.item.output)
+        while True:
+            async for event in response.stream_events():
+                if isinstance(event, RawResponsesStreamEvent):
+                    if isinstance(
+                        event.data, ResponseReasoningTextDeltaEvent
+                    ) or isinstance(
+                            event.data, ResponseReasoningSummaryTextDeltaEvent
+                    ):
+                        delta = event.data.delta or ""
+                        thinking_response += delta
+                        yield ('thinking', delta)
+                    elif isinstance(event.data, ResponseTextDeltaEvent):
+                        delta = event.data.delta or ""
+                        text_response += delta
+                        yield ('text', delta)
+                elif isinstance(event, RunItemStreamEvent):
+                    if event.name == "tool_called":
+                        tool_name = event.item.raw_item.name
+                        yield ('tool_call', tool_name)
+                    elif event.name == "tool_output":
+                        yield ('tool_response', event.item.output)
+
+            if not response.interruptions:
+                break
+
+            state = response.to_state()
+
+            for item in response.interruptions:
+                yield ('tool_approval', (item, state))
+
+            # Release the old response so the GC can reclaim the
+            # previous RunState before we allocate a new one.
+            del response
+
+            response = Runner.run_streamed(
+                self.agent,
+                state,
+                max_turns=50,
+            )
+
+        # del response
 
         if thinking_response:
             self.messages.append({
                 'id': '__fake_id__',
                 'type': 'reasoning',
                 'summary': [{'text': thinking_response, 'type': 'summary_text'}]
-                })
+            })
+            self._trim_messages()
 
         self.add_message("assistant", text_response)
 
+        # Emit a memory diagnostic if history is large
+        mem_mb = self._estimate_memory_mb()
+        if mem_mb > 50:
+            print(
+                f"ⓘ [copane] Message history: {len(self.messages)} messages, "
+                f"~{mem_mb:.1f} MB. Use /clear to reset.\n",
+                file=sys.stderr, flush=True,
+            )
 
-# agent = TmuxAgent(name="tmux-agent")
-_agent = None  # Initialize the agent lazily to avoid setup issues on import
+
+# Singleton — initialized lazily to avoid setup issues on import
+_agent = None
+
 
 def get_agent() -> TmuxAgent:
     """Get the singleton instance of TmuxAgent."""
