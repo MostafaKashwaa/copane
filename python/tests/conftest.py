@@ -1,7 +1,6 @@
 """Shared fixtures and helpers for copane tool tests."""
 
 import json
-import re
 import os
 import tempfile
 from pathlib import Path
@@ -27,38 +26,26 @@ def _ctx(**overrides) -> ToolContext:
     )
 
 
-async def invoke(tool, **kwargs) -> str:
+async def invoke(tool, **kwargs) -> tools.ToolResult:
     """Call a tool's `on_invoke_tool` with JSON-serialised kwargs.
 
-    Returns the string result (which is a serialised ToolResult).
+    Returns the ToolResult object directly (tools now return the Pydantic
+    model rather than its string representation).
     """
     ctx = _ctx(tool_name=tool.name, tool_arguments=json.dumps(kwargs))
     raw = await tool.on_invoke_tool(ctx, json.dumps(kwargs))
     return raw
 
 
-def parse_result(raw: str) -> tools.ToolResult:
-    """Parse the tool's string output back into a ToolResult pydantic model.
+def parse_result(raw: tools.ToolResult) -> tools.ToolResult:
+    """Pass-through for backward compatibility — tools now return ToolResult directly.
 
-    The string format is:
-      "[Error: <type>] <msg>" for failures
-      "<output>" for success (maybe with "[output truncated]" suffix)
+    Previously tools returned a string representation and this function
+    parsed it back.  Now tools return ToolResult objects, so this is a
+    no-op.  Kept so existing test code using ``parse_result()`` still
+    compiles, but new tests can just use the result directly.
     """
-    if raw.startswith("[Error: "):
-        match = re.match(r"^\[Error: (\w+)\] (.*)", raw)
-        if match:
-            return tools.ToolResult(
-                success=False,
-                error=match.group(2),
-                error_type=match.group(1),
-            )
-    # Parse success output, checking for truncated marker
-    truncated = raw.endswith("[output truncated]")
-    if truncated:
-        output = raw[: -len("[output truncated]")]
-    else:
-        output = raw
-    return tools.ToolResult(success=True, output=output, truncated=truncated)
+    return raw
 
 
 # ---------------------------------------------------------------------------
