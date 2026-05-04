@@ -43,7 +43,7 @@ def format_tool_preview(item: ToolApprovalItem) -> str:
         path = args.get('path', '(unknown)')
         return f"Tool: {tool_name}\nPath: {path}\n(Note: This will delete the file if approved)"
     elif 'run_command' in tool_name or tool_name == 'run_command':
-        command = args.get('command', '(unknown)')
+        command = args.get('cmd', '(unknown)')
         return f"Tool: {tool_name}\nCommand: {command}\n(Note: This will execute the command if approved)"
     else:
         lines = [f"Tool: {tool_name}"]

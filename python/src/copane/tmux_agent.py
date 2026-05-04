@@ -2,12 +2,18 @@
 """
 tmux-agent: AI agent configuration for terminal-based coding assistance.
 Enhanced with professional model selection and configuration management.
+
+Conversation memory is managed through turn-boundary summarization:
+file-read results from the previous turn are compressed to metadata
+stubs (path, line count, purpose hint) so memory stays O(one turn).
 """
 
 import logging
 import os
 import json
 import sys
+import gc
+import time
 from pathlib import Path
 from typing import Dict, Any
 
@@ -18,28 +24,55 @@ from openai.types.responses import ResponseReasoningSummaryTextDeltaEvent, Respo
 from langsmith import traceable
 
 from copane.tools import (
-    read_file,
-    run_command,
+    get_current_dir,
     grep_files,
     list_files,
+    read_file,
+    run_command,
     write_file,
-    get_current_dir
+    TOOL_SUMMARIZERS,
 )
 
 # ---------------------------------------------------------------------------
 # Memory safety limits
 # ---------------------------------------------------------------------------
 
-# Maximum number of messages to retain in conversation history.
-# Each turn adds 2-3 messages (user, optional reasoning, assistant).
-# At 100 messages ≈ 33-50 turns, which is plenty for context while
-# keeping memory under ~10 MB for text alone.  Tool outputs stored
-# inside RunState are separate and bounded by max_turns per run.
+# Hard message-count cap (never allow more than this, regardless of byte
+# budget).  Each turn adds 2-3 messages (user, reasoning, assistant).
+# After turn-boundary summarization this should never fire in normal use.
 MAX_MESSAGES = 100
 
 # When we exceed MAX_MESSAGES we trim back to this fraction of MAX
 # so we don't trim on every single add_message call.
 TRIM_TARGET_FRACTION = 0.75
+
+# Byte budget for the entire message history (tool outputs included).
+# Raised to 5 MB now that turn-boundary summarization keeps normal
+# conversations well under 1 MB.  This is a circuit breaker, not flow
+# control.
+MAX_HISTORY_BYTES = 5_000_000  # 5 MB
+
+# When we trim due to byte budget, we keep this many of the most recent
+# messages.  This ensures the model retains recent context.
+KEEP_RECENT_MESSAGES = 20
+
+# Reasoning / chain-of-thought text can be enormous (50-100 KB per turn
+# for DeepSeek-R1 style models).  We store only the tail of each
+# reasoning block so history doesn't blow up.
+MAX_REASONING_CHARS = 8_000
+
+MAX_TOOL_TURNS = 50  # max turns for a single tool-using response
+
+# Internal metadata fields that must be stripped before sending
+# messages to the model API.  The SDK's chatcmpl_converter rejects
+# any dict whose keys are not exactly {"role", "content"}.
+_INTERNAL_FIELDS = frozenset({
+    "_turn_id",
+    "_tool_name",
+    "_tool_args",
+    "_tool_truncated",
+    "_is_summary",
+})
 
 
 class ModelConfig:
@@ -85,7 +118,8 @@ class ModelConfig:
     def load_config(self) -> Dict[str, Any]:
         """Load configuration from file."""
         try:
-            with open(self.config_file, 'r') as f:
+           
+            with open(self.config_file) as f:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
             return self.default_config
@@ -133,7 +167,12 @@ class ModelConfig:
 
 
 class TmuxAgent:
-    """TmuxAgent is an AI assistant designed to help with coding tasks in a terminal environment."""
+    """TmuxAgent is an AI coding assistant that runs inside a tmux pane.
+
+    Conversation memory is managed through turn-boundary summarization:
+    file-read results from the previous turn are compressed to metadata
+    stubs so memory stays O(one turn), not O(total conversation).
+    """
 
     def __init__(self, name):
         self.name = name
@@ -149,8 +188,210 @@ class TmuxAgent:
         ]
         self.model_config = ModelConfig()
         self._trim_warned = False  # only warn once about trimming
+        self._turn_id: int = 0     # incremented on each user message
+
+    # ── Full-history persistence ────────────────────────────────────
+
+    def _save_full_history(self):
+        """Write the complete message list to disk before summarization.
+
+        Saved to ``~/.copane/logs/session_<timestamp>.json``.
+        Creates the directory if it doesn't exist.
+        """
+        logs_dir = Path.home() / ".copane" / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        path = logs_dir / f"session_{ts}.json"
+        try:
+            with open(path, "w") as f:
+                json.dump(self.messages, f, indent=2, default=str)
+        except (TypeError, OSError, IOError) as e:
+            logging.warning("Failed to save full history: %s", e)
+
+    # ── Turn-boundary summarization ─────────────────────────────────
+
+    def _build_summary(self, turn_tools: dict) -> str | None:
+        """Build a metadata summary block from grouped tool outputs.
+
+        Dispatches to per-tool ``summarize()`` functions defined
+        alongside each tool (see ``tools/__init__.py`` for the
+        ``TOOL_SUMMARIZERS`` registry).  Section headers are defined
+        here in the agent — they are a presentation concern, not a
+        tool concern.
+        """
+        _SECTION_HEADERS = {
+            "read_file": "Files read:",
+            "grep_files": "Searches:",
+            "run_command": "Commands run:",
+            "list_files": "Directories listed:",
+            "write_file": "Files written:",
+        }
+
+        lines = ["[PREVIOUS TURN — tool outputs summarized]", ""]
+        any_content = False
+
+        for tool_name, items in turn_tools.items():
+            summarizer = TOOL_SUMMARIZERS.get(tool_name)
+            if summarizer is None:
+                continue
+
+            section_lines = []
+            for item in items:
+                args = item.get("_tool_args", {})
+                output = item.get("content", "")
+                line = summarizer(args, output)
+                if line is not None:
+                    section_lines.append(f"  {line}")
+
+            if section_lines:
+                header = _SECTION_HEADERS.get(tool_name)
+                if header:
+                    lines.append(header)
+                lines.extend(section_lines)
+                lines.append("")
+                any_content = True
+
+        if not any_content:
+            return None  # nothing to summarize
+
+        lines.append(
+            "(Use read_file to re-read any file if exact content is needed.)")
+        return "\n".join(lines)
+
+    def _summarize_previous_turn(self):
+        """Compress tool outputs from the previous turn into metadata.
+
+        Called at the start of ``add_message()`` when the new message is
+        from the user (i.e. a turn boundary).  Saves full history to disk
+        first, then replaces the previous turn's tool-output messages
+        with a single summary.
+        """
+        if self._turn_id == 0:
+            return  # first turn — nothing to summarize
+
+        # Save full history before modifying it
+        self._save_full_history()
+
+        prev_turn = self._turn_id  # current turn ID before increment
+
+        # Collect all messages from the previous turn
+        prev_messages = [
+            m for m in self.messages
+            if m.get("_turn_id") == prev_turn
+        ]
+
+        # Group tool-output messages by tool name
+        turn_tools: dict[str, list[dict]] = {}
+        for m in prev_messages:
+            if m.get("role") == "tool":
+                tool_name = m.get("_tool_name", "unknown")
+                turn_tools.setdefault(tool_name, []).append(m)
+
+        if not turn_tools:
+            return  # no tool outputs to summarize
+
+        # Build summary
+        summary = self._build_summary(turn_tools)
+        if summary is None:
+            return
+
+        # Find the last user message of the previous turn (to insert
+        # the summary after it).  The summary should appear right after
+        # the user message, before any tool calls or assistant response.
+        last_user_idx = None
+        for i, m in enumerate(self.messages):
+            if m.get("_turn_id") == prev_turn and m.get("role") == "user":
+                last_user_idx = i
+
+        if last_user_idx is None:
+            return  # should not happen
+
+        # Now remove all tool-output messages from the previous turn.
+        # We must do this in reverse order to preserve indices.
+        indices_to_remove = [
+            i for i, m in enumerate(self.messages)
+            if m.get("_turn_id") == prev_turn and m.get("role") == "tool"
+        ]
+        for i in reversed(indices_to_remove):
+            self.messages.pop(i)
+
+        # Recalculate insert position after removals
+        new_last_user_idx = None
+        for i, m in enumerate(self.messages):
+            if m.get("_turn_id") == prev_turn and m.get("role") == "user":
+                new_last_user_idx = i
+
+        if new_last_user_idx is not None:
+            summary_msg = {
+                "role": "system",
+                "content": summary,
+                "_turn_id": prev_turn,
+                "_is_summary": True,
+            }
+            self.messages.insert(new_last_user_idx + 1, summary_msg)
 
     # ── Message / memory management ─────────────────────────────────
+
+    @staticmethod
+    def _strip_internal_fields(messages: list[dict]) -> list[dict]:
+        """Return a shallow copy of *messages* with internal metadata
+        fields (``_turn_id``, ``_tool_name``, etc.) removed.
+
+        The OpenAI Agents SDK chat completion converter rejects dicts
+        whose keys are not exactly ``{"role", "content"}`` (see
+        ``maybe_easy_input_message`` in ``chatcmpl_converter.py``).
+        This helper produces clean dicts safe for the model API while
+        keeping the internal fields on ``self.messages`` for
+        turn-boundary summarization.
+        """
+        return [
+            {k: v for k, v in m.items() if k not in _INTERNAL_FIELDS}
+            for m in messages
+        ]
+
+    def _estimate_total_bytes(self) -> int:
+        """Estimate the total byte size of the full message history.
+
+        Walks every message and sums the length of all text fields
+        (role, content, reasoning summaries, tool outputs, etc.).
+        """
+        try:
+            total = 0
+            for m in self.messages:
+                # Quick path: str-ify the whole message (fast enough for
+                # the typical 50-100 message case).
+                total += len(str(m))
+            return total
+        except (TypeError, AttributeError, KeyError):
+            return 0
+
+    def _trim_by_byte_budget(self):
+        """Aggressively trim old messages when the byte budget is exceeded.
+
+        Keeps the most recent KEEP_RECENT_MESSAGES and drops everything
+        older.  This is a last-resort safety valve — normal trimming
+        happens via _trim_messages (message-count based).
+        """
+        total = self._estimate_total_bytes()
+        if total <= MAX_HISTORY_BYTES:
+            return
+
+        if not self._trim_warned:
+            print(
+                f"\n⚠ [copane] Message history too large (~{total / 1_000_000:.1f} MB). "
+                f"Trimming oldest messages to prevent OOM. "
+                f"Use /clear to reset.\n",
+                file=sys.stderr, flush=True,
+            )
+            self._trim_warned = True
+
+        keep = min(KEEP_RECENT_MESSAGES, len(self.messages))
+        dropped = len(self.messages) - keep
+        self.messages = self.messages[-keep:] if keep else []
+        logging.warning(
+            "Byte-budget trim: dropped %d messages, kept %d (~%d KB now)",
+            dropped, keep, self._estimate_total_bytes() // 1024,
+        )
 
     def _trim_messages(self):
         """Trim old messages when we exceed MAX_MESSAGES.
@@ -177,18 +418,7 @@ class TmuxAgent:
 
     def _estimate_memory_mb(self) -> float:
         """Rough estimate of memory used by self.messages (MB)."""
-        try:
-            total = sum(
-                len(str(m.get("content", ""))) for m in self.messages
-            )
-            for m in self.messages:
-                if m.get("type") == "reasoning":
-                    for s in m.get("summary", []):
-                        total += len(str(s.get("text", "")))
-            return total / (1024 * 1024)
-        except (TypeError, AttributeError, KeyError):
-            logging.warning("Failed to estimate memory usage of messages")
-            return 0.0
+        return self._estimate_total_bytes() / (1024 * 1024)
 
     # ── Model management ────────────────────────────────────────────
 
@@ -209,7 +439,7 @@ class TmuxAgent:
         }
 
     def _check_model_status(self, model_info: Dict[str, Any]) -> str:
-        """Check if the model is available and configured."""
+        """Check the availability status of a model."""
         env_key = model_info.get("env_key", "")
 
         if model_info.get("type") == "local":
@@ -227,8 +457,6 @@ class TmuxAgent:
                     return "unreachable"
             else:
                 return "unavailable (local model missing base_url)"
-
-            # return "available" # if model_info.get("base_url") else "unavailable"
 
         if env_key:
             api_key = os.getenv(env_key)
@@ -329,20 +557,43 @@ Be concise. Code first, explanation after.
 If asked to modify code, show the diff or write the file directly.
 If the you tried a tool that makes changes and needs approval, and the changes were not approved, do not retry, instead
 ask the user about the reason for the rejection and how to proceed.
+
+## Conversation memory
+
+Between turns, file read results from the previous turn are summarized
+to metadata (path, line count, purpose hint). Exact file contents are
+NOT retained across turns.
+
+- Gather all needed information from files within the current turn.
+- At the start of a new turn, re-read key files if exact content is
+  needed (one read_file call per file gets full contents).
+- Use grep_files first to locate relevant sections, then read_file
+  with start_line/end_line to zoom in.
 """,
             tools=self.tools,
             model=model,
         )
 
     def add_message(self, role: str, content: str):
-        """Add a message to the conversation history."""
-        self.messages.append({"role": role, "content": content})
+        """Add a message to the conversation history.
+
+        At user-message boundaries (turn boundaries), summarizes tool
+        outputs from the previous turn to keep memory bounded.
+        """
+        if role == "user":
+            self._summarize_previous_turn()
+            self._turn_id += 1
+
+        msg: dict = {"role": role, "content": content, "_turn_id": self._turn_id}
+        self.messages.append(msg)
         self._trim_messages()
+        self._trim_by_byte_budget()
 
     def clear_messages(self):
         """Clear the conversation history."""
         self.messages = []
         self._trim_warned = False
+        self._turn_id = 0
 
     def get_message_count(self) -> int:
         """Get the number of messages in the conversation history."""
@@ -362,14 +613,19 @@ ask the user about the reason for the rejection and how to proceed.
                 state.approve(item)
             case 'n':
                 state.reject(
-                    item, rejection_message="User rejected this tool call. If you can't proceed without this tool call, stop trying and ask the user how to proceed.")
+                    item, rejection_message="User rejected this tool call. If you can't proceed without this tool call, stop trying and ask the user how to proceed."
+                )
             case 'a':
-                state.approve(item, always_approve=True)
+                state.approve(item)
+                # After approval, the runner will continue — we signal
+                # to the UI that "always allow" was requested so it can
+                # auto-approve subsequent tool calls in this round.
             case 'r':
-                state.reject(item, always_reject=True,
-                             rejection_message="User rejected this tool call and all future calls to this tool. If you can't proceed without this tool call, stop trying and ask the user how to proceed.")
+                state.reject(
+                    item, rejection_message="User requested retry with modifications. Try a different approach."
+                )
             case 'q':
-                raise KeyboardInterrupt(
+                raise RuntimeError(
                     "Tool approval process interrupted by user.")
             case _:
                 raise ValueError(
@@ -377,11 +633,7 @@ ask the user about the reason for the rejection and how to proceed.
 
     # ── Streaming response ──────────────────────────────────────────
 
-    # NOTE: @traceable is intentionally NOT used on stream_response.
-    # The decorator wraps the entire async generator, which can live for
-    # many minutes across multiple tool-approval rounds.  LangSmith
-    # tracing would accumulate trace blobs in memory for the lifetime
-    # of the generator.
+    @traceable(run_type='chain', name='Stream Response')
     async def stream_response(self, user_input: str):
         """Get a response from the agent based on user input."""
         if not self.agent:
@@ -391,12 +643,15 @@ ask the user about the reason for the rejection and how to proceed.
 
         response = Runner.run_streamed(
             self.agent,
-            self.messages,
-            max_turns=50
+            self._strip_internal_fields(self.messages),
+            max_turns=MAX_TOOL_TURNS,
         )
 
         thinking_response = ""
         text_response = ""
+        pending_tool_name: str | None = None
+        pending_tool_args = None
+
         while True:
             async for event in response.stream_events():
                 if isinstance(event, RawResponsesStreamEvent):
@@ -415,9 +670,32 @@ ask the user about the reason for the rejection and how to proceed.
                 elif isinstance(event, RunItemStreamEvent):
                     if event.name == "tool_called":
                         tool_name = event.item.raw_item.name
+                        tool_args = event.item.raw_item.arguments
+                        pending_tool_name = tool_name
+                        try:
+                            pending_tool_args = json.loads(tool_args) if isinstance(tool_args, str) else tool_args
+                        except (json.JSONDecodeError, TypeError):
+                            pending_tool_args = {"raw": str(tool_args)}
                         yield ('tool_call', tool_name)
                     elif event.name == "tool_output":
-                        yield ('tool_response', event.item.output)
+                        # Store tool output in message history with metadata
+                        output_str = event.item.output
+                        if not isinstance(output_str, str):
+                            output_str = str(output_str)
+                        tool_msg = {
+                            "role": "tool",
+                            "content": output_str,
+                            "_turn_id": self._turn_id,
+                            "_tool_name": pending_tool_name or "unknown",
+                            "_tool_args": pending_tool_args or {},
+                        }
+                        # Check for truncated flag in the output
+                        if "[output truncated]" in output_str:
+                            tool_msg["_tool_truncated"] = True
+                        self.messages.append(tool_msg)
+                        yield ('tool_response', output_str)
+                        pending_tool_name = None
+                        pending_tool_args = None
 
             if not response.interruptions:
                 break
@@ -427,9 +705,12 @@ ask the user about the reason for the rejection and how to proceed.
             for item in response.interruptions:
                 yield ('tool_approval', (item, state))
 
-            # Release the old response so the GC can reclaim the
-            # previous RunState before we allocate a new one.
+            # Release the old response and force GC before allocating
+            # the next one.  RunState objects can be large (they carry
+            # full tool-output history), and the GC may not run on its
+            # own between rapid tool-approval rounds.
             del response
+            gc.collect()
 
             response = Runner.run_streamed(
                 self.agent,
@@ -437,19 +718,25 @@ ask the user about the reason for the rejection and how to proceed.
                 max_turns=50,
             )
 
-        # del response
-
+        # ── Store reasoning (truncated) ──────────────────────────
         if thinking_response:
+            if len(thinking_response) > MAX_REASONING_CHARS:
+                thinking_response = (
+                    thinking_response[-MAX_REASONING_CHARS:]
+                    + f"\n[... {len(thinking_response) - MAX_REASONING_CHARS} chars of earlier reasoning trimmed]"
+                )
             self.messages.append({
                 'id': '__fake_id__',
                 'type': 'reasoning',
-                'summary': [{'text': thinking_response, 'type': 'summary_text'}]
+                'summary': [{'text': thinking_response, 'type': 'summary_text'}],
+                '_turn_id': self._turn_id,
             })
             self._trim_messages()
+            self._trim_by_byte_budget()
 
         self.add_message("assistant", text_response)
 
-        # Emit a memory diagnostic if history is large
+        # ── Memory diagnostic ────────────────────────────────────
         mem_mb = self._estimate_memory_mb()
         if mem_mb > 50:
             print(
