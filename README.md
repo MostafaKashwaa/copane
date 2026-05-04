@@ -142,7 +142,7 @@ let g:copane_mapping_prefix = ',c'
 | `g:copane_debug` | `0` | Show debug messages |
 | `g:copane_start_command` | `''` | Custom command for the tmux pane |
 | `g:copane_enable_ftplugin` | `1` | Load filetype-specific plugins |
-| `g:copane_enable_neovim_async` | `1` | Use Neovim async features |
+| `g:copane_no_mappings` | `0` | Disable default mappings |
 | `g:copane_no_suggestions` | `0` | Suppress startup messages |
 
 ## Mappings
@@ -290,8 +290,18 @@ copane/
 │       └── copane/
 │           ├── __init__.py
 │           ├── app.py          ← Main AI application (entry point)
+│           ├── cli.py          ← CLI argument parsing
+│           ├── ui.py           ← Banner, streaming output, diff display
 │           ├── tmux_agent.py   ← Agent + ModelConfig logic
-│           ├── tools.py        ← Tool definitions (read file, run command, etc.)
+│           ├── tools/
+│           │   ├── __init__.py
+│           │   ├── _base.py          ← ToolResult, truncation, safety helpers
+│           │   ├── read_file.py
+│           │   ├── run_command.py
+│           │   ├── grep_files.py
+│           │   ├── list_files.py
+│           │   ├── write_file.py
+│           │   └── get_current_dir.py
 │           ├── file_utils.py   ← File completion & expansion
 │           ├── term_styles.py  ← Terminal styling and colors
 │           └── check_deps.py   ← Dependency checker
