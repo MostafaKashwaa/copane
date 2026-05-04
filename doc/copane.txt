@@ -279,7 +279,7 @@ For a convenient keybinding to open copane, add to ~/.tmux.conf:
 
 :CopaneSetupPython
     Run the Python setup script (setup_python.sh) to create the
-    virtual environment and install dependencies.
+    virtual environment and install dependencies in one step.
     Runs automatically on first :CopaneOpen if the venv doesn't exist.
 
 :CopaneEditSecrets
@@ -565,7 +565,15 @@ Then use:
     │           ├── cli.py           # Argument parsing, model listing
     │           ├── ui.py            # Banner, streaming output
     │           ├── tmux_agent.py    # Agent, model config, chat loop
-    │           ├── tools.py         # Agent function tools
+    │           ├── tools/           
+    │           │   ├── __init__.py         # Tool registry and helper functions 
+    │           │   ├── _base.py            # ToolResult, truncation, safety
+    │           │   ├── read_file.py        # read_file tool
+    │           │   ├── run_command.py      # run_command tool 
+    │           │   ├── grep_files.py       # grep_files tool
+    │           │   ├── list_files.py       # list_files tool
+    │           │   ├── write_file.py       # write_file tool 
+    │           │   └── get_current_dir.py  
     │           ├── file_utils.py    # File completer, @file expansion
     │           ├── term_styles.py   # ANSI colors, logo, print helpers
     │           └── check_deps.py    # Dependency checker
@@ -602,9 +610,16 @@ Run the application:
 Run the dependency checker:
 >
     python3 python/src/copane/check_deps.py
+
+8.3 Running Tests ~
+
+From the python directory, run:
+>
+     pip install -e ".[dev]"  # or uv sync
+     pytest
 <
 
-8.3 Architecture ~
+8.4 Architecture ~
 
 The copane Python application runs as a persistent process inside a tmux
 pane. The Vim plugin communicates with it by sending text directly to the
@@ -620,7 +635,7 @@ Key design decisions:
   - Neovim has optional async remote plugin support (rplugin/)
   - Tool calls and LLM responses are traced via langsmith
 
-8.4 Contributing ~
+8.5 Contributing ~
 
 1. Fork the repository
 2. Create a feature branch (git checkout -b feature/amazing)
