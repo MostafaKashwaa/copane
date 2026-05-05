@@ -293,6 +293,48 @@ class TmuxAgent:
         except (TypeError, AttributeError, KeyError):
             return 0
 
+    # ── Orphan repair ───────────────────────────────────────────────
+
+    def _repair_orphaned_outputs(self):
+        """Remove ``function_call_output`` messages whose matching
+        ``function_call`` is missing.
+
+        After trimming old messages (either by count or byte budget),
+        it is possible that a ``function_call_output`` survives but its
+        corresponding ``function_call`` was dropped.  The OpenAI Agents
+        SDK requires every ``function_call_output`` to be preceded by a
+        ``function_call`` with the same ``call_id`` — an orphaned output
+        causes a hard error.
+
+        This method scans the message list and drops any
+        ``function_call_output`` whose ``call_id`` is not also present
+        on a ``function_call`` message.
+        """
+        # Collect call_ids that have a live function_call
+        valid_call_ids: set[str] = set()
+        for m in self.messages:
+            if m.get("type") == "function_call":
+                cid = m.get("call_id")
+                if cid:
+                    valid_call_ids.add(cid)
+
+        # Filter out orphaned function_call_output messages
+        before = len(self.messages)
+        self.messages = [
+            m for m in self.messages
+            if m.get("type") != "function_call_output"
+            or m.get("call_id") in valid_call_ids
+        ]
+        removed = before - len(self.messages)
+        if removed:
+            logging.warning(
+                "Orphan repair: removed %d function_call_output(s) with no "
+                "matching function_call.",
+                removed,
+            )
+
+    # ── Trimming ────────────────────────────────────────────────────
+
     def _trim_by_byte_budget(self):
         """Aggressively trim old messages when the byte budget is exceeded.
 
@@ -316,6 +358,7 @@ class TmuxAgent:
         keep = min(KEEP_RECENT_MESSAGES, len(self.messages))
         dropped = len(self.messages) - keep
         self.messages = self.messages[-keep:] if keep else []
+        self._repair_orphaned_outputs()
         logging.warning(
             "Byte-budget trim: dropped %d messages, kept %d (~%d KB now)",
             dropped, keep, self._estimate_total_bytes() // 1024,
@@ -343,6 +386,7 @@ class TmuxAgent:
         target = int(MAX_MESSAGES * TRIM_TARGET_FRACTION)
         trimmed = len(self.messages) - target
         self.messages = self.messages[trimmed:]
+        self._repair_orphaned_outputs()
 
     def _estimate_memory_mb(self) -> float:
         """Rough estimate of memory used by self.messages (MB)."""
@@ -546,13 +590,10 @@ summarized result in the original order.
                     item, rejection_message="User rejected this tool call. If you can't proceed without this tool call, stop trying and ask the user how to proceed."
                 )
             case 'a':
-                state.approve(item)
-                # After approval, the runner will continue — we signal
-                # to the UI that "always allow" was requested so it can
-                # auto-approve subsequent tool calls in this round.
+                state.approve(item, always_approve=True)
             case 'r':
                 state.reject(
-                    item, rejection_message="User requested retry with modifications. Try a different approach."
+                    item, always_reject=True, rejection_message="User requested retry with modifications. Try a different approach."
                 )
             case 'q':
                 raise RuntimeError(
