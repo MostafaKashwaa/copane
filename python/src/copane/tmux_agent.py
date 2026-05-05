@@ -4,10 +4,13 @@ tmux-agent: AI agent configuration for terminal-based coding assistance.
 Enhanced with professional model selection and configuration management.
 
 Conversation memory is managed through turn-boundary summarization:
-file-read results from the previous turn are compressed to metadata
-stubs (path, line count, purpose hint) so memory stays O(one turn).
+tool outputs from the previous turn are compressed to metadata stubs
+in-place (path, line count, purpose hint for file reads; exit code +
+preview for commands; etc.) so memory stays O(one turn) and the
+conversation shape is preserved.
 """
 
+from dataclasses import dataclass, field
 import logging
 import os
 import json
@@ -33,6 +36,15 @@ from copane.tools import (
     TOOL_SUMMARIZERS,
 )
 
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s [%(levelname)s] %(message)s",
+#     handlers=[
+#         logging.FileHandler("tmux_agent.log"),
+#         logging.StreamHandler(sys.stdout)
+#     ]
+# )
+#
 # ---------------------------------------------------------------------------
 # Memory safety limits
 # ---------------------------------------------------------------------------
@@ -64,14 +76,15 @@ MAX_REASONING_CHARS = 8_000
 MAX_TOOL_TURNS = 50  # max turns for a single tool-using response
 
 # Internal metadata fields that must be stripped before sending
-# messages to the model API.  The SDK's chatcmpl_converter rejects
-# any dict whose keys are not exactly {"role", "content"}.
+# messages to the model API.  The SDK's chatcmpl_converter handles
+# both ``EasyInputMessageParam`` (``{"role", "content"}``) and
+# ``FunctionCallOutput`` (``{"type", "call_id", "output"}``) —
+# neither tolerates extra keys.
 _INTERNAL_FIELDS = frozenset({
     "_turn_id",
     "_tool_name",
     "_tool_args",
     "_tool_truncated",
-    "_is_summary",
 })
 
 
@@ -118,7 +131,7 @@ class ModelConfig:
     def load_config(self) -> Dict[str, Any]:
         """Load configuration from file."""
         try:
-           
+
             with open(self.config_file) as f:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
@@ -170,8 +183,9 @@ class TmuxAgent:
     """TmuxAgent is an AI coding assistant that runs inside a tmux pane.
 
     Conversation memory is managed through turn-boundary summarization:
-    file-read results from the previous turn are compressed to metadata
-    stubs so memory stays O(one turn), not O(total conversation).
+    tool outputs are compressed to metadata stubs in-place so memory
+    stays O(one turn), not O(total conversation), and the conversation
+    shape is preserved.
     """
 
     def __init__(self, name):
@@ -210,61 +224,14 @@ class TmuxAgent:
 
     # ── Turn-boundary summarization ─────────────────────────────────
 
-    def _build_summary(self, turn_tools: dict) -> str | None:
-        """Build a metadata summary block from grouped tool outputs.
-
-        Dispatches to per-tool ``summarize()`` functions defined
-        alongside each tool (see ``tools/__init__.py`` for the
-        ``TOOL_SUMMARIZERS`` registry).  Section headers are defined
-        here in the agent — they are a presentation concern, not a
-        tool concern.
-        """
-        _SECTION_HEADERS = {
-            "read_file": "Files read:",
-            "grep_files": "Searches:",
-            "run_command": "Commands run:",
-            "list_files": "Directories listed:",
-            "write_file": "Files written:",
-        }
-
-        lines = ["[PREVIOUS TURN — tool outputs summarized]", ""]
-        any_content = False
-
-        for tool_name, items in turn_tools.items():
-            summarizer = TOOL_SUMMARIZERS.get(tool_name)
-            if summarizer is None:
-                continue
-
-            section_lines = []
-            for item in items:
-                args = item.get("_tool_args", {})
-                output = item.get("content", "")
-                line = summarizer(args, output)
-                if line is not None:
-                    section_lines.append(f"  {line}")
-
-            if section_lines:
-                header = _SECTION_HEADERS.get(tool_name)
-                if header:
-                    lines.append(header)
-                lines.extend(section_lines)
-                lines.append("")
-                any_content = True
-
-        if not any_content:
-            return None  # nothing to summarize
-
-        lines.append(
-            "(Use read_file to re-read any file if exact content is needed.)")
-        return "\n".join(lines)
-
     def _summarize_previous_turn(self):
-        """Compress tool outputs from the previous turn into metadata.
+        """Compress tool outputs from the previous turn into metadata stubs.
 
         Called at the start of ``add_message()`` when the new message is
         from the user (i.e. a turn boundary).  Saves full history to disk
-        first, then replaces the previous turn's tool-output messages
-        with a single summary.
+        first, then replaces each tool-output message's ``output`` field
+        in-place with its summarised stub.  Nothing is removed or moved —
+        the conversation shape is preserved.
         """
         if self._turn_id == 0:
             return  # first turn — nothing to summarize
@@ -272,63 +239,24 @@ class TmuxAgent:
         # Save full history before modifying it
         self._save_full_history()
 
-        prev_turn = self._turn_id  # current turn ID before increment
+        prev_turn = self._turn_id
 
-        # Collect all messages from the previous turn
-        prev_messages = [
-            m for m in self.messages
-            if m.get("_turn_id") == prev_turn
-        ]
+        for m in self.messages:
+            if m.get("_turn_id") != prev_turn:
+                continue
+            if m.get("type") != "function_call_output":
+                continue
 
-        # Group tool-output messages by tool name
-        turn_tools: dict[str, list[dict]] = {}
-        for m in prev_messages:
-            if m.get("role") == "tool":
-                tool_name = m.get("_tool_name", "unknown")
-                turn_tools.setdefault(tool_name, []).append(m)
+            tool_name = m.get("_tool_name", "")
+            summarizer = TOOL_SUMMARIZERS.get(tool_name)
+            if summarizer is None:
+                continue
 
-        if not turn_tools:
-            return  # no tool outputs to summarize
-
-        # Build summary
-        summary = self._build_summary(turn_tools)
-        if summary is None:
-            return
-
-        # Find the last user message of the previous turn (to insert
-        # the summary after it).  The summary should appear right after
-        # the user message, before any tool calls or assistant response.
-        last_user_idx = None
-        for i, m in enumerate(self.messages):
-            if m.get("_turn_id") == prev_turn and m.get("role") == "user":
-                last_user_idx = i
-
-        if last_user_idx is None:
-            return  # should not happen
-
-        # Now remove all tool-output messages from the previous turn.
-        # We must do this in reverse order to preserve indices.
-        indices_to_remove = [
-            i for i, m in enumerate(self.messages)
-            if m.get("_turn_id") == prev_turn and m.get("role") == "tool"
-        ]
-        for i in reversed(indices_to_remove):
-            self.messages.pop(i)
-
-        # Recalculate insert position after removals
-        new_last_user_idx = None
-        for i, m in enumerate(self.messages):
-            if m.get("_turn_id") == prev_turn and m.get("role") == "user":
-                new_last_user_idx = i
-
-        if new_last_user_idx is not None:
-            summary_msg = {
-                "role": "system",
-                "content": summary,
-                "_turn_id": prev_turn,
-                "_is_summary": True,
-            }
-            self.messages.insert(new_last_user_idx + 1, summary_msg)
+            args = m.get("_tool_args", {})
+            output = m.get("output", "")
+            summary = summarizer(args, output)
+            if summary is not None:
+                m["output"] = summary
 
     # ── Message / memory management ─────────────────────────────────
 
@@ -337,12 +265,12 @@ class TmuxAgent:
         """Return a shallow copy of *messages* with internal metadata
         fields (``_turn_id``, ``_tool_name``, etc.) removed.
 
-        The OpenAI Agents SDK chat completion converter rejects dicts
-        whose keys are not exactly ``{"role", "content"}`` (see
-        ``maybe_easy_input_message`` in ``chatcmpl_converter.py``).
-        This helper produces clean dicts safe for the model API while
-        keeping the internal fields on ``self.messages`` for
-        turn-boundary summarization.
+        The OpenAI Agents SDK chat completion converter handles both
+        ``EasyInputMessageParam`` (``{"role", "content"}``) and
+        ``FunctionCallOutput`` (``{"type", "call_id", "output"}``) —
+        neither tolerates extra keys.  This helper produces clean dicts
+        safe for the model API while keeping the internal fields on
+        ``self.messages`` for turn-boundary summarization.
         """
         return [
             {k: v for k, v in m.items() if k not in _INTERNAL_FIELDS}
@@ -560,9 +488,11 @@ ask the user about the reason for the rejection and how to proceed.
 
 ## Conversation memory
 
-Between turns, file read results from the previous turn are summarized
-to metadata (path, line count, purpose hint). Exact file contents are
-NOT retained across turns.
+Between turns, tool outputs are compressed to metadata stubs in-place
+(path, line count, purpose hint for file reads; exit code + preview
+for commands; etc.). Exact file contents are NOT retained across turns.
+The conversation shape is preserved — you see every tool call and its
+summarized result in the original order.
 
 - Gather all needed information from files within the current turn.
 - At the start of a new turn, re-read key files if exact content is
@@ -631,7 +561,13 @@ NOT retained across turns.
                 raise ValueError(
                     f"Invalid decision: {decision}. Must be one of 'y', 'n', 'a', 'r', or 'q'.")
 
-    # ── Streaming response ──────────────────────────────────────────
+    @dataclass
+    class _StreamingContext:
+        """Context for streaming responses, including partial reasoning and text."""
+        thinking_response: str = ""
+        text_response: str = ""
+        pending_tool_calls: dict[str, tuple[str, Any]
+                                 ] = field(default_factory=dict)
 
     @traceable(run_type='chain', name='Stream Response')
     async def stream_response(self, user_input: str):
@@ -647,55 +583,11 @@ NOT retained across turns.
             max_turns=MAX_TOOL_TURNS,
         )
 
-        thinking_response = ""
-        text_response = ""
-        pending_tool_name: str | None = None
-        pending_tool_args = None
+        ctx = self._StreamingContext()
 
         while True:
-            async for event in response.stream_events():
-                if isinstance(event, RawResponsesStreamEvent):
-                    if isinstance(
-                        event.data, ResponseReasoningTextDeltaEvent
-                    ) or isinstance(
-                            event.data, ResponseReasoningSummaryTextDeltaEvent
-                    ):
-                        delta = event.data.delta or ""
-                        thinking_response += delta
-                        yield ('thinking', delta)
-                    elif isinstance(event.data, ResponseTextDeltaEvent):
-                        delta = event.data.delta or ""
-                        text_response += delta
-                        yield ('text', delta)
-                elif isinstance(event, RunItemStreamEvent):
-                    if event.name == "tool_called":
-                        tool_name = event.item.raw_item.name
-                        tool_args = event.item.raw_item.arguments
-                        pending_tool_name = tool_name
-                        try:
-                            pending_tool_args = json.loads(tool_args) if isinstance(tool_args, str) else tool_args
-                        except (json.JSONDecodeError, TypeError):
-                            pending_tool_args = {"raw": str(tool_args)}
-                        yield ('tool_call', tool_name)
-                    elif event.name == "tool_output":
-                        # Store tool output in message history with metadata
-                        output_str = event.item.output
-                        if not isinstance(output_str, str):
-                            output_str = str(output_str)
-                        tool_msg = {
-                            "role": "tool",
-                            "content": output_str,
-                            "_turn_id": self._turn_id,
-                            "_tool_name": pending_tool_name or "unknown",
-                            "_tool_args": pending_tool_args or {},
-                        }
-                        # Check for truncated flag in the output
-                        if "[output truncated]" in output_str:
-                            tool_msg["_tool_truncated"] = True
-                        self.messages.append(tool_msg)
-                        yield ('tool_response', output_str)
-                        pending_tool_name = None
-                        pending_tool_args = None
+            async for event in self._process_runner_events(response, ctx):
+                yield event
 
             if not response.interruptions:
                 break
@@ -705,38 +597,118 @@ NOT retained across turns.
             for item in response.interruptions:
                 yield ('tool_approval', (item, state))
 
-            # Release the old response and force GC before allocating
-            # the next one.  RunState objects can be large (they carry
-            # full tool-output history), and the GC may not run on its
-            # own between rapid tool-approval rounds.
-            del response
-            gc.collect()
+            response = self._recreate_runner(response, state)
 
-            response = Runner.run_streamed(
-                self.agent,
-                state,
-                max_turns=50,
+        self._store_reasoning(ctx.thinking_response)
+        self.add_message("assistant", ctx.text_response)
+        self._print_memory_warning()
+
+    # ──────────────────── Event processing ─────────────────────────────────
+    async def _process_runner_events(self, response, ctx: _StreamingContext):
+        """Process events from the Runner, yielding tool approvals as needed."""
+        async for event in response.stream_events():
+            if isinstance(event, RawResponsesStreamEvent):
+                result = self._handle_raw_event(event, ctx)
+                if result is not None:
+                    yield result
+            elif isinstance(event, RunItemStreamEvent):
+                result = self._handle_run_item_event(event, ctx)
+                if result is not None:
+                    yield result
+
+    # ──────────────────── Event handlers ─────────────────────────────────
+    def _handle_raw_event(self, event: RawResponsesStreamEvent, context: _StreamingContext) -> tuple[str, str] | None:
+        """Handle a single raw event from the response stream."""
+        if isinstance(event.data, ResponseReasoningTextDeltaEvent) or isinstance(
+            event.data, ResponseReasoningSummaryTextDeltaEvent
+        ):
+            delta = event.data.delta or ""
+            context.thinking_response += delta
+            return ('thinking', delta)
+        elif isinstance(event.data, ResponseTextDeltaEvent):
+            delta = event.data.delta or ""
+            context.text_response += delta
+            return ('text', delta)
+        return None
+
+    def _handle_run_item_event(self, event: RunItemStreamEvent, ctx: _StreamingContext) -> tuple[str, str] | None:
+        """Handle a single run item event from the response stream."""
+        # tool_calls = {}
+        match event.name:
+            case "tool_called":
+                tool_call_id = event.item.raw_item.call_id
+                tool_name = event.item.raw_item.name
+                tool_args = event.item.raw_item.arguments
+
+                fcall_msg = {
+                    "type": "function_call",
+                    "call_id": tool_call_id,
+                    "name": tool_name,
+                    "arguments": tool_args,
+                    "_turn_id": self._turn_id,
+                }
+                self.messages.append(fcall_msg)
+                # tool_calls[tool_call_id] = (tool_name, tool_args)
+                ctx.pending_tool_calls[tool_call_id] = (tool_name, tool_args)
+                return ('tool_call', tool_name)
+            case "tool_output":
+                # Store tool output in message history with metadata.
+                # Use the SDK-native ``FunctionCallOutput`` dict shape
+                # so the SDK's input converter accepts it on future turns.
+                output_str = event.item.output
+                if not isinstance(output_str, str):
+                    output_str = str(output_str)
+                tool_call_id = event.item.raw_item.get('call_id') if isinstance(
+                    event.item.raw_item, dict) else None
+                tool_name = ctx.pending_tool_calls.get(tool_call_id, (None, None))[
+                    0] if tool_call_id else None
+                tool_args = ctx.pending_tool_calls.get(tool_call_id, (None, None))[
+                    1] if tool_call_id else None
+                # tool_name = event.item.raw_item.get('name') if isinstance(
+                # event.item.raw_item, dict) else None
+                # tool_args = event.item.raw_item.get('arguments') if isinstance(
+                # event.item.raw_item, dict) else None
+                try:
+                    tool_args_parsed = json.loads(tool_args) if isinstance(
+                        tool_args, str) else tool_args
+                except (json.JSONDecodeError, TypeError):
+                    tool_args_parsed = {"raw": str(tool_args)}
+                tool_msg = {
+                    "type": "function_call_output",
+                    "call_id": tool_call_id or "",
+                    "output": output_str,
+                    "_turn_id": self._turn_id,
+                    "_tool_name": tool_name or "unknown",
+                    "_tool_args": tool_args_parsed or {},
+                }
+                # Check for truncated flag in the output
+                if "[output truncated]" in output_str:
+                    tool_msg["_tool_truncated"] = True
+                self.messages.append(tool_msg)
+                return ('tool_response', output_str)
+        return None
+
+    # ──────────────────── Post-response processing ─────────────────────────────────
+    def _store_reasoning(self, reasoning: str):
+        """Store reasoning text in the conversation history as a special message."""
+        if not reasoning:
+            return
+        if len(reasoning) > MAX_REASONING_CHARS:
+            reasoning = (
+                reasoning[-MAX_REASONING_CHARS:]
+                + f"\n[... {len(reasoning) - MAX_REASONING_CHARS} chars of earlier reasoning trimmed]"
             )
+        self.messages.append({
+            'id': '__fake_id__',
+            'type': 'reasoning',
+            'summary': [{'text': reasoning, 'type': 'summary_text'}],
+            '_turn_id': self._turn_id,
+        })
+        self._trim_messages()
+        self._trim_by_byte_budget()
 
-        # ── Store reasoning (truncated) ──────────────────────────
-        if thinking_response:
-            if len(thinking_response) > MAX_REASONING_CHARS:
-                thinking_response = (
-                    thinking_response[-MAX_REASONING_CHARS:]
-                    + f"\n[... {len(thinking_response) - MAX_REASONING_CHARS} chars of earlier reasoning trimmed]"
-                )
-            self.messages.append({
-                'id': '__fake_id__',
-                'type': 'reasoning',
-                'summary': [{'text': thinking_response, 'type': 'summary_text'}],
-                '_turn_id': self._turn_id,
-            })
-            self._trim_messages()
-            self._trim_by_byte_budget()
-
-        self.add_message("assistant", text_response)
-
-        # ── Memory diagnostic ────────────────────────────────────
+    def _print_memory_warning(self):
+        """print a warning to stderr if the estimated memory usage of the message history exceeds a threshold."""
         mem_mb = self._estimate_memory_mb()
         if mem_mb > 50:
             print(
@@ -744,6 +716,21 @@ NOT retained across turns.
                 f"~{mem_mb:.1f} MB. Use /clear to reset.\n",
                 file=sys.stderr, flush=True,
             )
+
+    #─────────────────── Runner recreation ─────────────────────────────────
+    def _recreate_runner(self, response, state):
+        """Recreate a Runner from the current response state after tool approval."""
+        # Release the old response and force GC before allocating
+        # the next one.  RunState objects can be large (they carry
+        # full tool-output history), and the GC may not run on its
+        # own between rapid tool-approval rounds.
+        del response
+        gc.collect()
+        return Runner.run_streamed(
+            self.agent,
+            state,
+            max_turns=MAX_TOOL_TURNS,
+        )
 
 
 # Singleton — initialized lazily to avoid setup issues on import
