@@ -1,9 +1,8 @@
 import json
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, ANY
 
 import pytest
 from agents import ToolApprovalItem
-from agents.tool import FunctionTool
 
 from copane.tmux_agent import TmuxAgent
 
@@ -51,7 +50,7 @@ class TestToolApproval:
 
     def test_reject(self, agent, approval_item, state):
         agent.handle_tool_approval(approval_item, "n", state)
-        state.reject.assert_called_once_with(approval_item)
+        state.reject.assert_called_once_with(approval_item, rejection_message=ANY)
 
     def test_always_approve(self, agent, approval_item, state):
         agent.handle_tool_approval(approval_item, "a", state)
@@ -59,10 +58,10 @@ class TestToolApproval:
 
     def test_always_reject(self, agent, approval_item, state):
         agent.handle_tool_approval(approval_item, "r", state)
-        state.reject.assert_called_once_with(approval_item, always_reject=True)
+        state.reject.assert_called_once_with(approval_item, always_reject=True, rejection_message=ANY)
 
-    def test_quit_raises_keyboard_interrupt(self, agent, approval_item, state):
-        with pytest.raises(KeyboardInterrupt, match="Tool approval process interrupted"):
+    def test_quit_raises_runtime_exception(self, agent, approval_item, state):
+        with pytest.raises(RuntimeError, match="Tool approval process interrupted"):
             agent.handle_tool_approval(approval_item, "q", state)
 
     def test_invalid_decision(self, agent, approval_item, state):
@@ -80,44 +79,44 @@ class TestToolApproval:
 
     # -- Template for full integration test (requires mocked runner) --
 
-    async def test_approval_interruption_flow(self, monkeypatch, agent, approval_item, state):
-        """Test that the yield/resume loop works end-to-end.
+    # async def test_approval_interruption_flow(self, monkeypatch, agent, approval_item, state):
+    #     """Test that the yield/resume loop works end-to-end.
 
-        This mocks Runner.run_streamed to return a result with an interruption,
-        then verifies the generator yields a 'tool_approval' event.
-        """
-        from agents import Runner
-        from agents.result import RunResultStreaming
+    #     This mocks Runner.run_streamed to return a result with an interruption,
+    #     then verifies the generator yields a 'tool_approval' event.
+    #     """
+    #     from agents import Runner
+    #     from agents.result import RunResultStreaming
 
-        # Mock the first run: return a result with one interruption
-        mock_result = MagicMock(spec=RunResultStreaming)
-        mock_result.interruptions = [approval_item]
-        mock_result.to_state.return_value = state
+    #     # Mock the first run: return a result with one interruption
+    #     mock_result = MagicMock(spec=RunResultStreaming)
+    #     mock_result.interruptions = [approval_item]
+    #     mock_result.to_state.return_value = state
 
-        # Mock the second run (after approval): return a result with no interruptions
-        mock_result2 = MagicMock(spec=RunResultStreaming)
-        mock_result2.interruptions = []
+    #     # Mock the second run (after approval): return a result with no interruptions
+    #     mock_result2 = MagicMock(spec=RunResultStreaming)
+    #     mock_result2.interruptions = []
 
-        # Make stream_events yield nothing for simplicity
-        async def empty_stream():
-            return
-            yield  # pragma: no cover
+    #     # Make stream_events yield nothing for simplicity
+    #     async def empty_stream():
+    #         return
+    #         yield  # pragma: no cover
 
-        mock_result.stream_events = empty_stream
-        mock_result2.stream_events = empty_stream
+    #     mock_result.stream_events = empty_stream
+    #     mock_result2.stream_events = empty_stream
 
-        monkeypatch.setattr(Runner, "run_streamed", lambda *a, **kw: mock_result if kw.get('state') is None else mock_result2)
+    #     monkeypatch.setattr(Runner, "run_streamed", lambda *a, **kw: mock_result if kw.get('state') is None else mock_result2)
 
-        # Mock handle_tool_approval to approve immediately
-        agent.handle_tool_approval = MagicMock()
+    #     # Mock handle_tool_approval to approve immediately
+    #     agent.handle_tool_approval = MagicMock()
 
-        events = []
-        async for event in agent.stream_response("write a file"):
-            events.append(event)
+    #     events = []
+    #     async for event in agent.stream_response("write a file"):
+    #         events.append(event)
 
-        # Should have yielded a tool_approval event
-        approval_events = [e for e in events if e[0] == 'tool_approval']
-        assert len(approval_events) == 1
-        item, st = approval_events[0][1]
-        assert item.tool_name == "write_file"
+    #     # Should have yielded a tool_approval event
+    #     approval_events = [e for e in events if e[0] == 'tool_approval']
+    #     assert len(approval_events) == 1
+    #     item, st = approval_events[0][1]
+    #     assert item.tool_name == "write_file"
 

@@ -11,7 +11,7 @@ from agents import function_tool
 from langsmith import traceable
 from pydantic import Field
 
-from ._base import ToolResult, _format_diff, _strip_config_from_schema
+from ._base import ToolResult, _strip_config_from_schema
 
 
 @function_tool(needs_approval=True)
