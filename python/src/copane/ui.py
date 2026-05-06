@@ -194,12 +194,12 @@ def _format_tool_output(res: ToolResult) -> str:
     if isinstance(res, str):
         # Legacy support for tools that return raw strings instead of ToolResult
         output = res.strip()
-        if output.startswith("[Error:") or output.startswith("[exit code:"):
-            line0 = output.splitlines()[0] if output else ""
-            return f" ✗ {line0} "
-        elif output.startswith("[exit code: 0]"):
+        if output.startswith("[exit code: 0]"):
             line0 = output.splitlines()[0] if output else ""
             return f" ✓ {line0} "
+        elif output.startswith("[Error:") or output.startswith("[exit code:"):
+            line0 = output.splitlines()[0] if output else ""
+            return f" ✗ {line0} "
         elif output.startswith("Wrote "):
             return f" ✓ ({output})"
         elif output:
@@ -214,11 +214,8 @@ def _format_tool_output(res: ToolResult) -> str:
         else:
             return " ✓ "
     else:
-        if res.output.strip():
-            line0 = res.output.splitlines()[0]
-            return f" ✗ {line0} "
-        else:
-            return " ✗ "
+        error_text = res.error.splitlines()[0].strip() if res.error else res.output.splitlines()[0].strip()
+        return f" ✗ {error_text} "
 
 
 # ── Streaming output ────────────────────────────────────────────────────
@@ -256,7 +253,7 @@ async def print_streamed_response(stream_generator):
                         color = Colors.INFO
                         plain_text_len += len(chunk)
                     print(f"{get_colored(result.strip(), color)}",
-                          end=" ", flush=True)
+                          end="\n", flush=True)
                 case 'tool_approval':
                     item, state = chunk
                     tool_name = item.tool_name or 'unknown tool'

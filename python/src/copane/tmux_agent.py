@@ -558,7 +558,8 @@ summarized result in the original order.
             self._summarize_previous_turn()
             self._turn_id += 1
 
-        msg: dict = {"role": role, "content": content, "_turn_id": self._turn_id}
+        msg: dict = {"role": role, "content": content,
+                     "_turn_id": self._turn_id}
         self.messages.append(msg)
         self._trim_messages()
         self._trim_by_byte_budget()
@@ -573,7 +574,7 @@ summarized result in the original order.
         """Get the number of messages in the conversation history."""
         # Each turn typically consists of a user message, an optional reasoning message, and an assistant message.
         # We extract exactly the user and assistant messages for a more accurate turn count, ignoring reasoning messages.
-        return sum(1 for m in self.messages if m.get("role") in ("user", "assistant"))
+        return sum(1 for m in self.messages if m.get("role") in ("user", "assistant")) // 2
 
     def save_conversation(self, file_path: str):
         """Save the conversation history to a file."""
@@ -672,9 +673,8 @@ summarized result in the original order.
             return ('text', delta)
         return None
 
-    def _handle_run_item_event(self, event: RunItemStreamEvent, ctx: _StreamingContext) -> tuple[str, str] | None:
+    def _handle_run_item_event(self, event: RunItemStreamEvent, ctx: _StreamingContext) -> tuple[str, Any] | None:
         """Handle a single run item event from the response stream."""
-        # tool_calls = {}
         match event.name:
             case "tool_called":
                 tool_call_id = event.item.raw_item.call_id
@@ -689,10 +689,24 @@ summarized result in the original order.
                     "_turn_id": self._turn_id,
                 }
                 self.messages.append(fcall_msg)
-                # tool_calls[tool_call_id] = (tool_name, tool_args)
                 ctx.pending_tool_calls[tool_call_id] = (tool_name, tool_args)
                 return ('tool_call', tool_name)
             case "tool_output":
+                # Intentionally cross-reference call_id via pending_tool_calls.
+                #
+                # The SDK gives us different raw_item types for the two events:
+                #   "tool_called" → ToolCallItem      → raw_item is a Pydantic model
+                #                   (ResponseFunctionToolCall) → use .call_id / .name / .arguments
+                #   "tool_output" → ToolCallOutputItem → raw_item is a TypedDict
+                #                   (FunctionCallOutput)      → use ["call_id"] / ["output"]
+                #
+                # Both are valid SDK types — this is not a bug, it's the framework's design.
+                # We deliberately store (name, args) in ctx.pending_tool_calls during the
+                # "tool_called" handler and look them up here by call_id, because the
+                # tool_output raw_item does not carry name/arguments. The isinstance(…, dict)
+                # guard is purely defensive: FunctionCallOutput is always dict-shaped.
+                #
+                #
                 # Store tool output in message history with metadata.
                 # Use the SDK-native ``FunctionCallOutput`` dict shape
                 # so the SDK's input converter accepts it on future turns.
@@ -705,10 +719,7 @@ summarized result in the original order.
                     0] if tool_call_id else None
                 tool_args = ctx.pending_tool_calls.get(tool_call_id, (None, None))[
                     1] if tool_call_id else None
-                # tool_name = event.item.raw_item.get('name') if isinstance(
-                # event.item.raw_item, dict) else None
-                # tool_args = event.item.raw_item.get('arguments') if isinstance(
-                # event.item.raw_item, dict) else None
+
                 try:
                     tool_args_parsed = json.loads(tool_args) if isinstance(
                         tool_args, str) else tool_args
@@ -726,7 +737,7 @@ summarized result in the original order.
                 if "[output truncated]" in output_str:
                     tool_msg["_tool_truncated"] = True
                 self.messages.append(tool_msg)
-                return ('tool_response', output_str)
+                return ('tool_response', event.item.output)
         return None
 
     # ──────────────────── Post-response processing ─────────────────────────────────
@@ -758,7 +769,7 @@ summarized result in the original order.
                 file=sys.stderr, flush=True,
             )
 
-    #─────────────────── Runner recreation ─────────────────────────────────
+    # ─────────────────── Runner recreation ─────────────────────────────────
     def _recreate_runner(self, response, state):
         """Recreate a Runner from the current response state after tool approval."""
         # Release the old response and force GC before allocating
