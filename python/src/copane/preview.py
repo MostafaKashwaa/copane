@@ -20,17 +20,25 @@ def format_diff(path: str, new_content: str) -> str:
     return f"(new file)\n---\n{new_content}\n---"
 
 
+def _get_raw_arguments(raw) -> str:
+    """Extract the arguments string from a raw_item that may be a dict or an object."""
+    if isinstance(raw, dict):
+        return raw.get('arguments', '')
+    return getattr(raw, 'arguments', '')
+
+
 def format_tool_preview(item: ToolApprovalItem) -> str:
     """Format a tool approval item for preview."""
 
     raw = item.raw_item
-    if not hasattr(raw, 'arguments') or not raw.arguments:
+    args_raw = _get_raw_arguments(raw)
+    if not args_raw:
         return f"Tool: {item.tool_name}\n(No arguments provided)"
 
     try:
-        args = json.loads(raw.arguments)
+        args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
     except (json.JSONDecodeError, TypeError, ValueError):
-        return f"Tool: {item.tool_name}\n(Arguments are not valid JSON)\n---\n{raw.arguments}\n---"
+        return f"Tool: {item.tool_name}\n(Arguments are not valid JSON)\n---\n{args_raw}\n---"
 
     tool_name = item.tool_name or ''
 
@@ -48,7 +56,6 @@ def format_tool_preview(item: ToolApprovalItem) -> str:
     else:
         lines = [f"Tool: {tool_name}"]
         for key, value in args.items():
-            display = value if len(str(value)) < 200 else str(value)[:200] + "..." 
+            display = value if len(str(value)) < 200 else str(value)[:200] + "..."
             lines.append(f"{key}: {display}")
         return "\n".join(lines)
-

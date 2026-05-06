@@ -142,6 +142,7 @@ let g:copane_mapping_prefix = ',c'
 | `g:copane_debug` | `0` | Show debug messages |
 | `g:copane_start_command` | `''` | Custom command for the tmux pane |
 | `g:copane_enable_ftplugin` | `1` | Load filetype-specific plugins |
+| `g:copane_enable_neovim_async` | `1` | Use Neovim async features |
 | `g:copane_no_mappings` | `0` | Disable default mappings |
 | `g:copane_no_suggestions` | `0` | Suppress startup messages |
 
