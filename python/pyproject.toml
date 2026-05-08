@@ -1,6 +1,6 @@
 [project]
 name = "copane"
-version = "0.0.01"
+version = "0.1.0a1"
 description = "AI-powered tmux pane for Vim/Neovim"
 requires-python = ">=3.12"
 dependencies = [

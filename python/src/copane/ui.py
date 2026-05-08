@@ -8,6 +8,7 @@ import os
 import sys
 from datetime import datetime
 
+from copane._version import get_version
 from copane.tmux_agent import get_agent
 from copane.term_styles import (
     Colors,
@@ -96,7 +97,7 @@ def print_banner():
     print(LOGO_DISPLAY)
 
     info_lines = {
-        "Version": "1.0.0",  # TODO: read from package metadata
+        "Version": get_version(),  
         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Python": sys.version.split()[0],
         "Terminal": os.getenv("TERM", "unknown"),
