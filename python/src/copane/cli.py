@@ -27,13 +27,14 @@ from copane.term_styles import (
     STAR,
     ARROW_RIGHT,
 )
+from copane._version import get_version
 
 
 # ── Brand constants ─────────────────────────────────────────────────────
 
 APP_NAME = "copane"
 APP_TAGLINE = "AI Coding Agent"
-APP_VERSION = "1.0.0"
+APP_VERSION = get_version()
 
 
 # ── Help examples ──────────────────────────────────────────────────────
