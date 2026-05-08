@@ -9,9 +9,11 @@ import asyncio
 import sys
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from dotenv import load_dotenv
 from prompt_toolkit.key_binding.key_bindings import KeyBindings
+from copane.completers import CopaneCompleter 
 
 from copane.cli import (
     APP_NAME,
@@ -26,6 +28,7 @@ from copane.ui import (
 )
 from copane.tmux_agent import get_agent 
 from copane.term_styles import (
+    COPANE_STYLE_SOLARIZED,
     ansi_bold,
     Colors,
     ansi_warn,
@@ -40,6 +43,10 @@ from copane.term_styles import (
     SEPARATOR,
     STAR,
     ARROW_RIGHT,
+    COPANE_STYLE_MONOKAI,
+    COPANE_STYLE_VSCODE,
+    COPANE_STYLE_CYAN,
+    COPANE_STYLE_LIGHT,
 )
 from copane.file_utils import FileCompleter, expand_files
 
@@ -82,15 +89,26 @@ def create_prompt_session() -> PromptSession:
     def _(event):
         event.current_buffer.validate_and_handle()
 
+    def get_continuation(width, line_number, is_soft_wrap):
+        if is_soft_wrap:
+            return HTML(f'<style fg="darkgray">{"." * (width - 2)} </style> ')
+            # return ansi_bold(f"{'.' * (width - 2)} ", CONTINUATION_COLOR)
+        else:
+            return HTML(f'<style fg="cyan">{line_number + 1} {ARROW_RIGHT}</style> ')
+            # return ansi_bold(f"{line_number + 1} {CONTINUATION_PROMPT} ", CONTINUATION_COLOR)
+
     return PromptSession(
-        completer=FileCompleter(),
+            # completer=FileCompleter(),
+        completer=CopaneCompleter(),
         history=FileHistory(COPANE_HISTORY),
         complete_while_typing=True,
+        style=COPANE_STYLE_MONOKAI,
         mouse_support=True,
         multiline=True,
-        prompt_continuation=lambda width, line_number, is_soft_wrap: ansi_bold(
-            f"{line_number} {CONTINUATION_PROMPT} ", CONTINUATION_COLOR
-        ),
+        prompt_continuation=get_continuation,
+        # prompt_continuation=lambda width, line_number, is_soft_wrap: ansi_bold(
+        #     f"{line_number} {CONTINUATION_PROMPT} ", CONTINUATION_COLOR
+        # ),
         key_bindings=bindings,
     )
 

@@ -1,7 +1,7 @@
 # ANSI color codes for 256-color terminals
 
 from prompt_toolkit import ANSI
-
+from prompt_toolkit.styles import Style
 
 class Colors:
     # Primary colors
@@ -243,6 +243,50 @@ def print_status_line(label, value, label_color=Colors.PRIMARY,
           f"{label_color}{Colors.BOLD}{label}:{Colors.RESET}"
           f"{pad}"
           f"{value_color}{value}{Colors.RESET}")
+
+
+# Style 1: Monokai Pro inspired — warm, dark, high contrast selection
+COPANE_STYLE_MONOKAI = Style([
+    ("completion-menu",                    "bg:#2d2d2d #e0e0e0"),
+    ("completion-menu.completion",         "bg:#2d2d2d #e0e0e0"),
+    ("completion-menu.completion.current", "bg:#005577 #ffffff bold"),
+    ("scrollbar",                          "bg:#444444"),
+    ("scrollbar.button",                   "bg:#666666"),
+    ("completion-menu.meta",               "bg:#444444 #aaaaaa"),
+])
+
+# Style 2: VS Code inspired — cooler blue-gray, clean and minimal
+COPANE_STYLE_VSCODE = Style([
+    ("completion-menu",                    "bg:#1e1e1e #d4d4d4"),
+    ("completion-menu.completion",         "bg:#1e1e1e #d4d4d4"),
+    ("completion-menu.completion.current", "bg:#264f78 #ffffff bold"),
+    ("scrollbar",                          "bg:#333333"),
+    ("scrollbar.button",                   "bg:#555555"),
+    ("completion-menu.meta",               "bg:#333333 #aaaaaa"),
+])
+
+# Style 3: Solarized Dark inspired — balanced, low contrast, easy on the eyes
+COPANE_STYLE_SOLARIZED = Style([
+    ("completion-menu",                    "bg:#002b36 #839496"),
+    ("completion-menu.completion",         "bg:#002b36 #839496"),
+    ("completion-menu.completion.current", "bg:#268bd2 #ffffff bold"),
+    ("scrollbar",                          "bg:#073642"),
+    ("scrollbar.button",                   "bg:#586e75"),
+    ("completion-menu.meta",               "bg:#073642 #839496"),
+])
+
+COPANE_STYLE_CYAN = Style([
+    ("completion-menu",                    "bg:#1a1a2e #e0e0e0"),
+    ("completion-menu.completion",         "bg:#1a1a2e #e0e0e0"),
+    ("completion-menu.completion.current", "bg:#16213e #0f3460 bold"),
+])
+
+COPANE_STYLE_LIGHT = Style([
+    ("completion-menu",                    "bg:#f5f5f5 #333333"),
+    ("completion-menu.completion",         "bg:#f5f5f5 #333333"),
+    ("completion-menu.completion.current", "bg:#d4edda #155724 bold"),
+])
+
 
 
 def print_color_preview():
