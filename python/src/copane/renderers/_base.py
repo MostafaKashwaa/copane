@@ -1,0 +1,42 @@
+"""
+Base classes and protocols for pluggable response renderers.
+
+Renderers are responsible for displaying thinking and text chunks
+as they stream from the LLM.  Tool calls, tool responses, and tool
+approval stay in ``ui.py`` — they are not markdown-formatted and
+do not vary between renderers.
+"""
+
+from abc import ABC, abstractmethod
+
+
+class Renderer(ABC):
+    """Pluggable renderer for streaming LLM responses.
+
+    Each renderer receives thinking and text chunks as they arrive
+    and decides how to format them for the terminal.
+    """
+
+    # ── Lifecycle ──────────────────────────────────────────────────
+
+    @abstractmethod
+    def on_response_begin(self) -> None:
+        """Called once, just before the first chunk arrives."""
+        ...
+
+    @abstractmethod
+    def on_response_complete(self) -> None:
+        """Called once after the final chunk has been delivered."""
+        ...
+
+    # ── Streaming chunks ───────────────────────────────────────────
+
+    @abstractmethod
+    def on_thinking_chunk(self, chunk: str) -> None:
+        """A chunk of reasoning / thinking text (e.g. chain-of-thought)."""
+        ...
+
+    @abstractmethod
+    def on_text_chunk(self, chunk: str) -> None:
+        """A chunk of the main response text (may contain markdown)."""
+        ...

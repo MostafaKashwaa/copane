@@ -17,6 +17,11 @@ for seamless code review, explanation, refactoring, and testing.
 - **Filetype-Aware**: Language-specific commands for Python and JavaScript
 - **Zero Manual Setup**: Python virtual environment is created automatically
   on first `:CopaneOpen`
+- **Pluggable Renderers**: Choose how LLM responses are displayed:
+  raw passthrough, inline ANSI markup, streaming markdown parsing, or
+  rich terminal formatting
+- **Multi-mode Tab Completion**: File paths after `@`, slash commands,
+  and model keys after `/switch`
 
 ## Installation
 
@@ -89,7 +94,38 @@ Or open it from inside Vim with:
 
 The local `local-ollama` model works without any API key.
 
-### 2. Model Configuration
+### 2. Renderer (Response Display)
+
+Control how LLM responses are displayed by setting `COPANE_RENDERER` in
+your `~/.copane.env`:
+
+```bash
+# Default: raw (no formatting)
+COPANE_RENDERER=regex
+
+# Available renderers:
+#   raw          — Passthrough, no markdown (default)
+#   regex        — Inline **bold**, *italic*, `code` (zero deps)
+#   markdown_it  — Streaming CommonMark parser (needs markdown-it-py)
+#   rich_buffer  — Raw during stream, replaced with rich at end (needs rich)
+```
+
+The `regex` renderer works out of the box. For `markdown_it` or `rich_buffer`,
+install the optional dependencies:
+
+```bash
+cd ~/.vim/plugged/copane/python
+.venv/bin/pip install ".[renderers]"
+```
+
+Or with uv:
+
+```bash
+cd ~/.vim/plugged/copane/python
+uv sync --extra renderers
+```
+
+### 3. Model Configuration
 
 Model settings (which models are available, API endpoints, which one is
 selected) are stored in:
@@ -115,7 +151,7 @@ Switch models at runtime inside the copane pane:
 /switch local-ollama
 ```
 
-### 3. Vim/Neovim Options
+### 4. Vim/Neovim Options
 
 The plugin works out of the box. All mappings use the prefix
 `<leader>t` by default. Change it in your vimrc:
@@ -220,6 +256,13 @@ Include files in your query with `@filename`. Example:
 review this @main.py for any bugs
 ```
 
+**Tab completion** is available for:
+- File paths after `@` (e.g. `@src/ma` → `@src/main.py`)
+- Slash commands (e.g. `/sw` → `/switch`)
+- Model keys after `/switch` (e.g. `/switch dee` → `/switch deepseek-chat`)
+
+Press `Ctrl+J` to submit multi-line input.
+
 ### From Terminal
 
 ```bash
@@ -277,6 +320,26 @@ Switch at runtime inside the copane pane:
 
 Or add custom models by editing `~/.config/tmux-agent/model_config.json`.
 
+## Renderers
+
+copane supports pluggable renderers that control how the LLM's response
+is displayed in the terminal. Select one by setting `COPANE_RENDERER` in
+`~/.copane.env`.
+
+| Renderer | What it does | Dependencies |
+|----------|-------------|--------------|
+| `raw` | Prints text exactly as it arrives. No formatting. | None |
+| `regex` | Converts `**bold**`, `*italic*`, `` `code` `` to ANSI colors on-the-fly. | None |
+| `markdown_it` | Buffers chunks, parses with CommonMark tokenizer, renders stable blocks to ANSI. | `markdown-it-py` |
+| `rich_buffer` | Prints raw during streaming, then clears and replaces with rich formatting at the end. | `rich` |
+
+To install optional renderer dependencies:
+
+```bash
+cd ~/.vim/plugged/copane/python
+.venv/bin/pip install ".[renderers]"
+```
+
 ## Project Structure
 
 ```
@@ -294,6 +357,14 @@ copane/
 │           ├── cli.py          ← CLI argument parsing
 │           ├── ui.py           ← Banner, streaming output, diff display
 │           ├── tmux_agent.py   ← Agent + ModelConfig logic
+│           ├── completers.py   ← Multi-mode Tab completer (files, commands, model keys)
+│           ├── renderers/      ← Pluggable streaming response renderers
+│           │   ├── _base.py          ← Renderer ABC (contract)
+│           │   ├── __init__.py       ← get_renderer() factory
+│           │   ├── raw_renderer.py   ← Raw passthrough (default)
+│           │   ├── regex_renderer.py ← Inline ANSI markup
+│           │   ├── markdown_it_renderer.py ← Streaming markdown-it-py
+│           │   └── rich_buffer_renderer.py ← Rich terminal formatting
 │           ├── tools/
 │           │   ├── __init__.py
 │           │   ├── _base.py          ← ToolResult, truncation, safety helpers
@@ -337,6 +408,13 @@ Python packages (installed automatically into the venv):
 - `langsmith` — Tracing and monitoring
 - `python-dotenv` — Environment variable management
 - `openai` — OpenAI API client
+
+Optional packages for enhanced rendering:
+
+- `rich` — Rich terminal formatting (`RichBufferRenderer`)
+- `markdown-it-py` — Streaming CommonMark parser (`MarkdownItRenderer`)
+
+Install them with: `pip install ".[renderers]"` from the `python/` directory.
 
 ## Troubleshooting
 
@@ -392,6 +470,13 @@ source ~/.bashrc
 
 ### "Not inside a tmux session"
 copane requires tmux. Start tmux first: `tmux` or `tmux new`.
+
+### Renderer not working
+If `markdown_it` or `rich_buffer` show a warning about missing dependencies:
+```bash
+cd ~/.vim/plugged/copane/python
+.venv/bin/pip install ".[renderers]"
+```
 
 ### Debug mode
 ```vim
