@@ -27,6 +27,7 @@ from copane.ui import (
     print_streamed_response,
 )
 from copane.tmux_agent import get_agent 
+from copane.renderers import get_renderer, AVAILABLE_RENDERERS
 from copane.term_styles import (
     COPANE_STYLE_SOLARIZED,
     ansi_bold,
@@ -150,6 +151,8 @@ async def handle_special_commands(user_input: str) -> bool:
         return True
 
     if cmd in ("help", "?"):
+        renderer_name = os.environ.get("COPANE_RENDERER", "raw").strip().lower()
+        renderer_desc = AVAILABLE_RENDERERS.get(renderer_name, "unknown")
         print_section_header("Commands", Colors.PRIMARY)
         for line in [
             ("/models", "List models"),
@@ -160,6 +163,10 @@ async def handle_special_commands(user_input: str) -> bool:
             ("exit / quit", "Quit"),
         ]:
             print_tuble(line, Colors.PRIMARY, Colors.RESET, spacing="18")
+        print_tuble(
+            ("Renderer:", f"{renderer_name} — {renderer_desc}"),
+            Colors.PRIMARY, Colors.INFO, spacing="18",
+        )
         return True
 
     if cmd == "clear":
@@ -194,6 +201,15 @@ async def async_main():
     print_info(f"Loaded environment from {os.environ['COPANE_ENV_FILE']}\n", Colors.DIM)
     agent = get_agent()  # Initialize agent after env is loaded
 
+    # ── Renderer selection ─────────────────────────────────────────────
+    renderer = get_renderer()  # reads COPANE_RENDERER env var
+    if args.no_banner:
+        pass  # renderer info is suppressed together with the banner
+    else:
+        rname = os.environ.get("COPANE_RENDERER", "regex").strip().lower()
+        rdesc = AVAILABLE_RENDERERS.get(rname, "")
+        print_info(f"Renderer: {rname} — {rdesc}", Colors.DIM)
+
     if handle_args(args):
         return
 
@@ -212,7 +228,7 @@ async def async_main():
         _show_interactive_header(args.mode)
         initial = build_initial_query(args)
         if initial:
-            await print_streamed_response(agent.stream_response(initial))
+            await print_streamed_response(agent.stream_response(initial), renderer=renderer)
             print_section_header(f"{STAR} Interactive Mode", Colors.SUCCESS)
             print("Continue chatting or type 'exit'.\n")
 
@@ -235,7 +251,7 @@ async def async_main():
             expanded = expand_files(user_input)
             print_dim("[Processing…]")
 
-            await print_streamed_response(agent.stream_response(expanded))
+            await print_streamed_response(agent.stream_response(expanded), renderer=renderer)
             print_dim(f"{SEPARATOR}\n")
 
         except KeyboardInterrupt:

@@ -31,6 +31,7 @@ from copane.term_styles import (
     BULLET,
 )
 from copane.preview import format_tool_preview
+from copane.renderers import Renderer, RawRenderer
 from prompt_toolkit import PromptSession
 
 from copane.tools import ToolResult
@@ -185,7 +186,7 @@ def print_no_banner():
     print_success(f"{APP_NAME} ready. Ask away!\n", f"{STAR} ")
 
 
-# # ── Tool output helpers ────────────────────────────────────────────────
+# ── Tool output helpers ────────────────────────────────────────────────
 
 def _format_tool_output(res: ToolResult) -> str:
     """Return a compact one-liner status icon + first-line preview.
@@ -221,23 +222,37 @@ def _format_tool_output(res: ToolResult) -> str:
 
 # ── Streaming output ────────────────────────────────────────────────────
 
-async def print_streamed_response(stream_generator):
+async def print_streamed_response(stream_generator, renderer: Renderer | None = None):
     """Print a streaming AI response chunk by chunk in the terminal.
 
     Handles KeyboardInterrupt and general exceptions gracefully.
+
+    *renderer* controls how thinking and text chunks are displayed.
+    Pass ``None`` to use the default (RawRenderer, no markdown).
+    Tool calls, tool responses, and approval are handled by this
+    function directly — they do not vary between renderers.
     """
+    if renderer is None:
+        renderer = RawRenderer()
+
     agent = get_agent()
-    print(f"\n{THINKING_DOTS}", end="\n", flush=True)
 
     # Track the actual plain-text length (without ANSI codes) for the summary
     plain_text_len = 0
 
     try:
+        renderer.on_response_begin()
+
         async for kind, chunk in stream_generator:
             match kind:
                 case 'thinking':
-                    print(get_dim(chunk), end="", flush=True)
+                    renderer.on_thinking_chunk(chunk)
                     plain_text_len += len(chunk)
+
+                case 'text':
+                    renderer.on_text_chunk(chunk)
+                    plain_text_len += len(chunk)
+
                 case 'tool_call':
                     print(
                         f"\n{get_colored(f'🔧 [{chunk}]', Colors.ACCENT)}",
@@ -245,6 +260,7 @@ async def print_streamed_response(stream_generator):
                     )
                     # approximate: icon + brackets
                     plain_text_len += len(chunk) + 5
+
                 case 'tool_response':
                     result = _format_tool_output(chunk)
                     if isinstance(chunk, ToolResult):
@@ -255,6 +271,7 @@ async def print_streamed_response(stream_generator):
                         plain_text_len += len(chunk)
                     print(f"{get_colored(result.strip(), color)}",
                           end="\n", flush=True)
+
                 case 'tool_approval':
                     item, state = chunk
                     tool_name = item.tool_name or 'unknown tool'
@@ -274,9 +291,13 @@ async def print_streamed_response(stream_generator):
                         return
 
                     agent.handle_tool_approval(item, decision, state)
+
                 case _:
-                    print(chunk, end="", flush=True)
-                    plain_text_len += len(chunk)
+                    # Unknown event kind — pass through as text
+                    renderer.on_text_chunk(str(chunk))
+                    plain_text_len += len(str(chunk))
+
+        renderer.on_response_complete()
 
         print("\n", flush=True)
         print_row(
