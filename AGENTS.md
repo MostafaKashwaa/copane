@@ -49,7 +49,15 @@ copane/                              # Git repo root (= Vim plugin root)
 │   │   ├── ui.py                    # Streaming display, banner, approval prompts
 │   │   ├── preview.py               # Diff preview formatting for tool approval
 │   │   ├── file_utils.py            # @filename completion (FileCompleter) and expansion
-│   │   ├── term_styles.py           # ANSI colors, logos, print helpers
+│   │   ├── completers.py            # Multi-mode completer (files, slash commands, model keys)
+│   │   ├── term_styles.py           # ANSI colors, logos, prompt_toolkit styles, print helpers
+│   │   ├── renderers/               # Pluggable streaming response renderers
+│   │   │   ├── __init__.py          # get_renderer() factory, AVAILABLE_RENDERERS registry
+│   │   │   ├── _base.py             # Renderer ABC — lifecycle + chunk handlers
+│   │   │   ├── raw_renderer.py      # RawRenderer — passthrough (default)
+│   │   │   ├── regex_renderer.py    # RegexRenderer — inline **bold**, *italic*, `code`
+│   │   │   ├── markdown_it_renderer.py  # MarkdownItRenderer — streaming markdown-it-py
+│   │   │   └── rich_buffer_renderer.py  # RichBufferRenderer — raw-then-replace with rich
 │   │   ├── tools/                   # Tool implementations
 │   │   │   ├── __init__.py          # Re-exports all tools + TOOL_SUMMARIZERS registry
 │   │   │   ├── _base.py             # Shared: ToolResult, truncation, danger heuristics, schema helpers
@@ -87,8 +95,8 @@ copane/                              # Git repo root (= Vim plugin root)
 ├── .env.example                     # Environment template
 ├── .github/workflows/test.yml       # CI — runs pytest on PRs to main/dev
 ├── README.md                        # User-facing documentation
-├── AGENTS.md                        # Outdated project reference (kept for historical context)
-└── COPANE.md                        # ← This file (current project reference)
+├── AGENTS.md                        # This file — project reference for AI agents
+└── COPANE.md                        # Older project reference (kept for historical context)
 ```
 
 > **Note:** The `guides/` directories (both `python/guides/` and the root
@@ -116,9 +124,12 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  python3 -m copane.app                        │
                     │  ┌──────────────────────────────────────┐     │
                     │  │ Async REPL (prompt_toolkit)          │     │
-                    │  │  • File completion (@filename Tab)   │     │
-                    │  │  • Multiline input (Ctrl+J to submit)│     │
-                    │  │  • Special commands (/switch, /clear)│     │
+                    │  │  • Multi-mode completion (Tab)       │     │
+                    │  │    - @filename → FileCompleter       │     │
+                    │  │    - /command → CommandCompleter      │     │
+                    │  │    - /switch <key> → ModelKeyCompleter│     │
+                    │  │  • Multiline input (Ctrl+J to submit) │     │
+                    │  │  • Special commands (/switch, /clear) │     │
                     │  └──────────────┬───────────────────────┘     │
                     │                 │ user_input                  │
                     │  ┌──────────────▼───────────────────────┐     │
@@ -129,6 +140,22 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  │  • Turn-boundary summarization       │     │
                     │  │  • Message trimming (safety net)     │     │
                     │  └──────────────┬───────────────────────┘     │
+                    │                 │ (kind, chunk) tuples        │
+                    │  ┌──────────────▼───────────────────────┐     │
+                    │  │ ui.py → print_streamed_response()    │     │
+                    │  │  • Dispatches to active Renderer      │     │
+                    │  │    for thinking + text chunks         │     │
+                    │  │  • Handles tool_call, tool_response,  │     │
+                    │  │    tool_approval directly (no renderer)│     │
+                    │  └──────────────┬───────────────────────┘     │
+                    │                 │                             │
+                    │  ┌──────────────▼─────────────────────────┐   │
+                    │  │ renderers/ package (4 renderers)       │   │
+                    │  │  • RawRenderer — passthrough (default) │   │
+                    │  │  • RegexRenderer — inline ANSI markup  │   │
+                    │  │  • MarkdownItRenderer — streaming parse│   │
+                    │  │  • RichBufferRenderer — raw then rich  │   │
+                    │  └────────────────────────────────────────┘   │
                     │                 │ tool calls                  │
                     │  ┌──────────────▼─────────────────────────┐   │
                     │  │ tools/ package (6 tools)               │   │
@@ -145,12 +172,14 @@ copane/                              # Git repo root (= Vim plugin root)
 ### Data flow for a user query
 
 1. User types in the REPL (or sends from Vim via tmux send-keys)
-2. `@filename` tokens are expanded to file contents by `expand_files()` in `app.py`
+2. `@filename` tokens are expanded to file contents by `expand_files()` in `file_utils.py`
 3. `TmuxAgent.stream_response()` is an async generator that yields `(kind, chunk)` tuples
 4. `kind` is one of: `"thinking"`, `"text"`, `"tool_call"`, `"tool_response"`, `"tool_approval"`
-5. For tool approval, `ui.py` shows a preview (diff for write_file, command for run_command)
-6. After the response completes, the assistant message is stored in `ConversationHistory`
-7. On the *next* user message, `_summarize_previous_turn()` compresses tool outputs in-place
+5. `ui.py` dispatches `"thinking"` and `"text"` chunks to the active `Renderer`
+6. Tool calls, tool responses, and approval prompts are handled directly by `ui.py` (they do not vary between renderers)
+7. For tool approval, `ui.py` shows a preview (diff for write_file, command for run_command) via `preview.py`
+8. After the response completes, the assistant message is stored in `ConversationHistory`
+9. On the *next* user message, `_summarize_previous_turn()` compresses tool outputs in-place
 
 ### Startup flow
 
@@ -158,7 +187,7 @@ copane/                              # Git repo root (= Vim plugin root)
 2. On `VimEnter`, `s:setup()` runs (deferred 100ms) → checks prerequisites, sets up venv path
 3. User runs `:CopaneOpen` → calls `tmux_agent#open()`
 4. `tmux_agent#open()` checks/creates venv via `setup_python.sh`, then creates a tmux split-pane running `python3 -m copane.app --env-file ~/.copane.env`
-5. `app.py` loads env file → creates `TmuxAgent` singleton → prints banner → enters REPL loop
+5. `app.py` loads env file → creates `TmuxAgent` singleton → selects renderer via `get_renderer()` → prints banner → enters REPL loop
 
 ## Key files — what to touch for common tasks
 
@@ -169,16 +198,96 @@ copane/                              # Git repo root (= Vim plugin root)
 | `python/src/copane/tools/` | Add/modify tools, change truncation limits, add danger patterns |
 | `python/src/copane/tools/_base.py` | Change `ToolResult` model, shared truncation, danger heuristics |
 | `python/src/copane/tools/__init__.py` | Register a new tool (imports + `TOOL_SUMMARIZERS` dict) |
-| `python/src/copane/app.py` | Change REPL behavior, add slash commands, modify startup |
+| `python/src/copane/app.py` | Change REPL behavior, add slash commands, modify startup, renderer selection |
 | `python/src/copane/cli.py` | Change CLI args, `--mode` dispatch, model info display |
-| `python/src/copane/ui.py` | Change streaming display, banner, approval prompt UI |
+| `python/src/copane/ui.py` | Change streaming display, banner, approval prompt UI, renderer dispatch |
+| `python/src/copane/renderers/` | Add/modify renderers: streaming output formatting for thinking + text chunks |
+| `python/src/copane/renderers/_base.py` | Change `Renderer` ABC — lifecycle and chunk-handler contract |
+| `python/src/copane/renderers/__init__.py` | Register a new renderer (add to `get_renderer()` + `AVAILABLE_RENDERERS`) |
+| `python/src/copane/completers.py` | Change Tab-completion: file paths, slash commands, model keys |
 | `python/src/copane/preview.py` | Change diff/preview formatting for tool approval |
 | `python/src/copane/model_config.py` | Change model config CRUD, default models |
 | `python/src/copane/model_provider.py` | Change model status checks, Agent construction, system prompt |
 | `python/src/copane/file_utils.py` | Change @filename completion or expansion |
-| `python/src/copane/term_styles.py` | Change colors, logos, print helpers |
+| `python/src/copane/term_styles.py` | Change colors, logos, prompt_toolkit styles, print helpers |
 | `autoload/tmux_agent.vim` | Change tmux pane lifecycle, Python venv setup |
 | `plugin/copane.vim` | Change Vim commands, mappings, autocmds |
+
+## How renderers work
+
+### Renderer contract
+
+Every renderer inherits from `Renderer` (ABC in `renderers/_base.py`) and implements
+four methods:
+
+```python
+class Renderer(ABC):
+    def on_response_begin(self) -> None: ...
+    def on_response_complete(self) -> None: ...
+    def on_thinking_chunk(self, chunk: str) -> None: ...
+    def on_text_chunk(self, chunk: str) -> None: ...
+```
+
+- **`on_response_begin()`** — called once before the first chunk. Use for headers,
+  state initialization.
+- **`on_thinking_chunk(chunk)`** — receives each raw thinking/reasoning chunk.
+- **`on_text_chunk(chunk)`** — receives each markdown-formatted response text chunk.
+- **`on_response_complete()`** — called once after the final chunk. Use for cleanup,
+  flushing buffers, or replacing raw output with formatted output.
+
+**Key principle:** Renderers only handle `"thinking"` and `"text"` chunks.
+Tool calls, tool responses, and tool approval are handled directly in
+`ui.py` — they do NOT vary between renderers.
+
+### Available renderers
+
+| Name | Class | Description | Dependencies |
+|------|-------|-------------|--------------|
+| `raw` | `RawRenderer` | Passthrough — prints chunks as-is (default, pre-renderer behaviour) | None |
+| `regex` | `RegexRenderer` | Converts `**bold**`, `*italic*`, `` `code` ``, and `### headings` to ANSI on-the-fly | None |
+| `markdown_it` | `MarkdownItRenderer` | Streaming CommonMark parser; buffers chunks, renders stable blocks to ANSI | `markdown-it-py` |
+| `rich_buffer` | `RichBufferRenderer` | Prints raw during streaming, clears and replaces with `rich.Markdown` on completion | `rich` |
+
+### Renderer selection
+
+Controlled by the `COPANE_RENDERER` environment variable. Set it in `~/.copane.env`:
+
+```bash
+COPANE_RENDERER=regex
+```
+
+Or at runtime in any shell before starting copane. Default is `"raw"`.
+
+The factory function `get_renderer(name=None)` in `renderers/__init__.py` reads
+the env var and returns the appropriate `Renderer` instance. Unknown names
+raise `ValueError`; missing optional dependencies raise `ImportError`.
+
+### Adding a new renderer
+
+1. Create `renderers/my_renderer.py` with a class inheriting from `Renderer`
+2. Implement all four abstract methods
+3. In `renderers/__init__.py`:
+   - Import the class (lazily if it has optional deps)
+   - Add a `case "my_renderer"` branch in `get_renderer()`
+   - Add an entry to `AVAILABLE_RENDERERS`
+4. If the renderer needs a new optional dependency, add it to
+   `[project.optional-dependencies]` in `pyproject.toml`
+
+## How completers work
+
+The `CopaneCompleter` in `completers.py` is a multi-mode Tab completer for
+the REPL. It inspects the input context and delegates:
+
+| Context | Completer | Example |
+|---------|-----------|---------|
+| `@partial_path` | `FileCompleter` (from `file_utils.py`) | `@src/main` → `@src/main.py` |
+| `/partial_cmd` (no space) | `CommandCompleter` | `/sw` → `/switch` |
+| `/switch partial_key` | `ModelKeyCompleter` | `/switch dee` → `deepseek-chat` |
+
+`CommandCompleter` offers: `/switch`, `/clear`, `/models`, `/modelinfo`, `/help`.
+
+`ModelKeyCompleter` reads available keys from `ModelConfig` on each activation
+(so it stays in sync if the user edits the config file).
 
 ## How tools work
 
@@ -303,7 +412,7 @@ the same `call_id`.
 
 | File | Location | Purpose |
 |------|----------|---------|
-| Environment | `~/.copane.env` | API keys (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, etc.) |
+| Environment | `~/.copane.env` | API keys (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, etc.) + `COPANE_RENDERER` |
 | Model config | `~/.config/tmux-agent/model_config.json` | Selected model, available models, endpoints |
 | History | `~/.local/share/copane/.copane_history` | prompt_toolkit REPL history |
 | Session logs | `~/.copane/logs/session_*.json` | Full message history dumps |
@@ -323,6 +432,13 @@ Declared in `python/pyproject.toml`:
 | `prompt-toolkit` | Interactive REPL with completion and history |
 | `pynvim` | Neovim remote plugin support (for `rplugin/`, currently broken) |
 | `autopep8` | Declared but **never imported** — dead dependency |
+
+Optional dependencies (`[renderers]` extras):
+
+| Package | Purpose |
+|---------|---------|
+| `rich` | Rich terminal rendering (`RichBufferRenderer`) |
+| `markdown-it-py` | Streaming CommonMark parser (`MarkdownItRenderer`) |
 
 Used as transitive dependencies (should be declared explicitly):
 - `pydantic` — `ToolResult` model
@@ -358,6 +474,8 @@ model provider, model config, conversation history, and tool schema/fixtures.
 | `/clear` | Clear conversation history |
 | `/help` | Show help |
 
+Tab completion is available for slash commands and model keys.
+
 ## Vim commands and mappings
 
 All mappings use `g:copane_mapping_prefix` (default `<leader>t`).
@@ -385,6 +503,7 @@ Filetype-specific (Python, JavaScript/TypeScript):
 ## What NOT to change without careful thought
 
 - **`ToolResult` schema** — the system prompt tells the LLM about it
+- **`Renderer` ABC** — the four-method contract is the interface between `ui.py` and all renderers
 - **`MAX_TOOL_TURNS=50`** in `tmux_agent.py` — hard cap on tool calls per round
 - **The summarizer contract** `summarize(args, output) -> str | None` — every tool exports it
 - **The singleton pattern** — `get_agent()` is called from both Vim and the REPL
@@ -392,10 +511,11 @@ Filetype-specific (Python, JavaScript/TypeScript):
 - **Environment file path** (`~/.copane.env`) — hardcoded in multiple places
 - **`_strip_config_from_schema` re-export** from `tools/__init__.py` — tests depend on it
 - **The `for_api()` method** in `ConversationHistory` — strips internal fields before sending to the model API; the SDK requires clean dicts
+- **The renderer dispatch in `ui.py`** — `"thinking"` and `"text"` go to the renderer; `"tool_call"`, `"tool_response"`, `"tool_approval"` are handled directly
 
 ## Known issues
 
-1. **Version inconsistency:** `pyproject.toml` says `0.0.01`, `cli.py` and `ui.py` say `1.0.0`. `_version.py` reads from pyproject.toml but is unused.
+1. **Version inconsistency:** `pyproject.toml` says `0.1.0a1`, `cli.py` and `ui.py` say `1.0.0`. `_version.py` reads from pyproject.toml but is unused.
 
 2. **Dead code files:** `check_deps.py`, `display.py`, `display_strategies.py`, `rplugin/python3/tmux_agent.py` are not imported by anything live.
 
@@ -403,12 +523,18 @@ Filetype-specific (Python, JavaScript/TypeScript):
 
 4. **Missing explicit dependencies:** `pydantic`, `python-dotenv`, and `httpx` are used directly but only available as transitive deps of `openai-agents`.
 
-5. **System prompt typos:** "wheather" → "whether" and "ouput" → "output" in `model_provider.py:192`.
+5. **System prompt typos:** "wheather" → "whether" and "ouput" → "output" in `model_provider.py`.
 
-6. **Stale backup files:** `*.bak`, `*.swp` files in `src/copane/` and `tests/`.
+6. **Stale backup files:** `*.bak`, `*.swp` files in `src/copane/`.
 
 7. **`list_files` has no `_truncate()` call** — output is limited only by `head -200` (entry count), not by byte length; unlike `run_command` and `grep_files` which apply `_truncate()`.
 
 8. **`check_deps.py` references old path** `~/.vim/copane-venv` which no longer exists.
 
 9. **`rplugin/python3/tmux_agent.py`** imports from nonexistent paths and will crash if Neovim loads it.
+
+10. **No renderer tests** — the renderer package has no unit tests yet.
+
+11. **`RichBufferRenderer` ANSI escape codes** — the cursor-up/clear sequence (`\\033[{N}F\\033[J`) assumes the raw output is still visible on screen; if the terminal scrolls, the replacement may misalign.
+
+12. **`MarkdownItRenderer` stability boundary** — uses `\\n\\n` as the paragraph break heuristic; inline-only markdown (bold/italic/code without paragraph breaks) may not render until the response completes and `on_response_complete()` flushes the buffer.
