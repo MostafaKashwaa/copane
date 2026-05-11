@@ -27,7 +27,7 @@ from copane.ui import (
     print_streamed_response,
 )
 from copane.tmux_agent import get_agent 
-from copane.renderers import get_renderer, AVAILABLE_RENDERERS
+from copane.renderers import get_renderer, get_renderer_key, AVAILABLE_RENDERERS, Renderer
 from copane.term_styles import (
     COPANE_STYLE_SOLARIZED,
     ansi_bold,
@@ -54,6 +54,12 @@ from copane.file_utils import FileCompleter, expand_files
 
 COPANE_HISTORY = os.path.expanduser('~/.local/share/copane/.copane_history')
 os.makedirs(os.path.dirname(COPANE_HISTORY), exist_ok=True)
+
+# ── Mutable renderer state ─────────────────────────────────────────────
+# Set once during startup, then /renderer can swap it at runtime.
+
+_current_renderer: Renderer | None = None
+
 
 # ── Environment loading ─────────────────────────────────────────────────
 
@@ -93,13 +99,10 @@ def create_prompt_session() -> PromptSession:
     def get_continuation(width, line_number, is_soft_wrap):
         if is_soft_wrap:
             return HTML(f'<style fg="darkgray">{"." * (width - 2)} </style> ')
-            # return ansi_bold(f"{'.' * (width - 2)} ", CONTINUATION_COLOR)
         else:
             return HTML(f'<style fg="cyan">{line_number + 1} {ARROW_RIGHT}</style> ')
-            # return ansi_bold(f"{line_number + 1} {CONTINUATION_PROMPT} ", CONTINUATION_COLOR)
 
     return PromptSession(
-            # completer=FileCompleter(),
         completer=CopaneCompleter(),
         history=FileHistory(COPANE_HISTORY),
         complete_while_typing=True,
@@ -107,9 +110,6 @@ def create_prompt_session() -> PromptSession:
         mouse_support=True,
         multiline=True,
         prompt_continuation=get_continuation,
-        # prompt_continuation=lambda width, line_number, is_soft_wrap: ansi_bold(
-        #     f"{line_number} {CONTINUATION_PROMPT} ", CONTINUATION_COLOR
-        # ),
         key_bindings=bindings,
     )
 
@@ -117,7 +117,7 @@ def create_prompt_session() -> PromptSession:
 # ── Special command dispatch ───────────────────────────────────────────
 
 async def handle_special_commands(user_input: str) -> bool:
-    """Handle in-REPL slash commands like /models, /switch, /clear.
+    """Handle in-REPL slash commands like /models, /switch, /clear, /renderer.
 
     Returns True if the input was consumed as a command.
     """
@@ -150,22 +150,58 @@ async def handle_special_commands(user_input: str) -> bool:
             print_model_list()
         return True
 
+    if cmd.startswith("renderer"):
+        global _current_renderer
+        # Split off the key (may be empty for /renderer with no args)
+        parts = cmd.split(maxsplit=1)
+        key = parts[1].strip() if len(parts) > 1 else ""
+
+        if key == "":
+            # List available renderers, highlighting the current one
+            current_key = get_renderer_key(_current_renderer)
+            print_section_header("Available Renderers", Colors.PRIMARY)
+            for rkey, rdesc in sorted(AVAILABLE_RENDERERS.items()):
+                is_current = rkey == current_key
+                marker = "→ " if is_current else "  "
+                color = Colors.SUCCESS if is_current else Colors.RESET
+                desc_color = Colors.INFO if is_current else Colors.DIM
+                print_tuble(
+                    (f"{marker}{rkey}", rdesc),
+                    color, desc_color, spacing="20",
+                )
+        else:
+            try:
+                _current_renderer = get_renderer(key)
+                rdesc = AVAILABLE_RENDERERS.get(key, "")
+                print_success(f"Renderer switched to: {key} — {rdesc}")
+            except (ValueError, ImportError) as e:
+                print_error(str(e))
+                # Show available renderers on error
+                print_info("Available renderers:", Colors.DIM)
+                for rkey, rdesc in sorted(AVAILABLE_RENDERERS.items()):
+                    print_tuble(
+                        (f"  {rkey}", rdesc),
+                        Colors.PRIMARY, Colors.DIM, spacing="20",
+                    )
+        return True
+
     if cmd in ("help", "?"):
-        renderer_name = os.environ.get("COPANE_RENDERER", "raw").strip().lower()
-        renderer_desc = AVAILABLE_RENDERERS.get(renderer_name, "unknown")
+        current_key = get_renderer_key(_current_renderer)
+        rdesc = AVAILABLE_RENDERERS.get(current_key, "unknown")
         print_section_header("Commands", Colors.PRIMARY)
         for line in [
             ("/models", "List models"),
             ("/switch <key>", "Switch model"),
+            ("/renderer [key]", "List or switch renderers"),
             ("/modelinfo", "Current model info"),
             ("/clear", "Clear history"),
             ("/help", "This help"),
             ("exit / quit", "Quit"),
         ]:
-            print_tuble(line, Colors.PRIMARY, Colors.RESET, spacing="18")
+            print_tuble(line, Colors.PRIMARY, Colors.RESET, spacing="20")
         print_tuble(
-            ("Renderer:", f"{renderer_name} — {renderer_desc}"),
-            Colors.PRIMARY, Colors.INFO, spacing="18",
+            ("Renderer:", f"{current_key} — {rdesc}"),
+            Colors.PRIMARY, Colors.INFO, spacing="20",
         )
         return True
 
@@ -194,6 +230,8 @@ def _show_interactive_header(mode: str):
 # ── Main loop ──────────────────────────────────────────────────────────
 
 async def async_main():
+    global _current_renderer
+
     args = parse_args()
 
     # Load environment file first (before any module-level code depends on it)
@@ -202,13 +240,12 @@ async def async_main():
     agent = get_agent()  # Initialize agent after env is loaded
 
     # ── Renderer selection ─────────────────────────────────────────────
-    renderer = get_renderer()  # reads COPANE_RENDERER env var
-    if args.no_banner:
-        pass  # renderer info is suppressed together with the banner
-    else:
-        rname = os.environ.get("COPANE_RENDERER", "regex").strip().lower()
-        rdesc = AVAILABLE_RENDERERS.get(rname, "")
-        print_info(f"Renderer: {rname} — {rdesc}", Colors.DIM)
+    _current_renderer = get_renderer()  # reads COPANE_RENDERER env var
+
+    if not args.no_banner:
+        rkey = get_renderer_key(_current_renderer)
+        rdesc = AVAILABLE_RENDERERS.get(rkey, "")
+        print_info(f"Renderer: {rkey} — {rdesc}", Colors.DIM)
 
     if handle_args(args):
         return
@@ -228,7 +265,7 @@ async def async_main():
         _show_interactive_header(args.mode)
         initial = build_initial_query(args)
         if initial:
-            await print_streamed_response(agent.stream_response(initial), renderer=renderer)
+            await print_streamed_response(agent.stream_response(initial), renderer=_current_renderer)
             print_section_header(f"{STAR} Interactive Mode", Colors.SUCCESS)
             print("Continue chatting or type 'exit'.\n")
 
@@ -251,7 +288,7 @@ async def async_main():
             expanded = expand_files(user_input)
             print_dim("[Processing…]")
 
-            await print_streamed_response(agent.stream_response(expanded), renderer=renderer)
+            await print_streamed_response(agent.stream_response(expanded), renderer=_current_renderer)
             print_dim(f"{SEPARATOR}\n")
 
         except KeyboardInterrupt:
