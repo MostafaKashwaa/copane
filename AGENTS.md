@@ -464,6 +464,8 @@ The test suite uses one test file per tool, plus tests for the agent,
 model provider, model config, conversation history, and tool schema/fixtures.
 `conftest.py` provides `tmp_dir`, `sample_file` fixtures and `invoke()` helper.
 
+NOTE: The `test_tool_run_command.py` contains a test for timeout behavior. It runs a command that sleeps for 60 seconds and expects it to be killed after 30 seconds. If you tried to run this test it would timeout and fail. If it fails in the scope you're testing and you need to verify it's working, ask the user to run it manually.
+
 ## In-repl commands
 
 | Command | Action |
