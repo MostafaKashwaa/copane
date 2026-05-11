@@ -2,8 +2,9 @@
 
 Provides multi-mode completion for:
   - @filename path completion (delegates to FileCompleter)
-  - Slash commands (/switch, /clear, /models, etc.)
+  - Slash commands (/switch, /clear, /models, /renderer, etc.)
   - Model keys after /switch <key>
+  - Renderer keys after /renderer <key>
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from prompt_toolkit.completion import Completer, Completion
 
 from copane.file_utils import FileCompleter
 from copane.model_config import ModelConfig
+from copane.renderers import AVAILABLE_RENDERERS
 
 
 class CommandCompleter(Completer):
@@ -23,7 +25,7 @@ class CommandCompleter(Completer):
     (meaning the user is still typing the command name).
     """
 
-    COMMANDS = ["/switch", "/clear", "/models", "/modelinfo", "/help"]
+    COMMANDS = ["/switch", "/renderer", "/clear", "/models", "/modelinfo", "/help"]
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -82,6 +84,33 @@ class ModelKeyCompleter(Completer):
                 )
 
 
+class RendererKeyCompleter(Completer):
+    """Completes renderer names after '/renderer '.
+
+    Reads the list of available renderers from AVAILABLE_RENDERERS
+    and offers them as completions.
+    """
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+
+        # Match /renderer followed by a space and optional partial key
+        m = re.match(r"^/renderer\s+(\S*)$", text)
+        if not m:
+            return
+
+        prefix = m.group(1)
+
+        for key in sorted(AVAILABLE_RENDERERS):
+            if key.startswith(prefix):
+                yield Completion(
+                    key,
+                    start_position=-len(prefix),
+                    display=key,
+                    style="bg:default",
+                )
+
+
 class CopaneCompleter(Completer):
     """Multi-mode completer for the copane REPL.
 
@@ -90,12 +119,14 @@ class CopaneCompleter(Completer):
       - @filename → FileCompleter
       - /command  → CommandCompleter
       - /switch <partial> → ModelKeyCompleter
+      - /renderer <partial> → RendererKeyCompleter
     """
 
     def __init__(self):
         self.file_completer = FileCompleter()
         self.command_completer = CommandCompleter()
         self.model_key_completer = ModelKeyCompleter()
+        self.renderer_key_completer = RendererKeyCompleter()
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -111,3 +142,7 @@ class CopaneCompleter(Completer):
         # Mode 3: After /switch — model key completion
         if re.match(r"^/switch\s+", text):
             yield from self.model_key_completer.get_completions(document, complete_event)
+
+        # Mode 4: After /renderer — renderer key completion
+        if re.match(r"^/renderer\s+", text):
+            yield from self.renderer_key_completer.get_completions(document, complete_event)
