@@ -12,7 +12,9 @@ Complete lines are emitted already-formatted.  Code fences,
 blockquotes, and tables accumulate raw lines during streaming
 and are redrawn with styling on close via cursor-up-and-redraw.
 
-Dependencies: none (stdlib only).
+Uses ``copane.screen_utils`` for cursor escapes, measurement, and
+composable block-level operations (``overwrite_block``,
+``rerender_in_place``).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 
+from copane import screen_utils
 from copane.renderers._base import Renderer
 from copane.term_styles import Colors
 
@@ -70,26 +73,6 @@ _HEADING_COLORS: dict[int, str] = {
     5: Colors.BOLD,
     6: Colors.BOLD,
 }
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────
-
-def _visual_width(text: str) -> int:
-    """Return the display width of *text*, ignoring ANSI escape sequences."""
-    return len(re.sub(r"\033\[[0-9;]*m", "", text))
-
-
-def _screen_lines(text: str, terminal_width: int) -> int:
-    """Return how many terminal rows *text* will occupy after wrapping.
-
-    Returns 0 if *text* is empty.  A terminal width of 0 or less is
-    treated as 1 to avoid division errors.
-    """
-    vw = _visual_width(text)
-    if vw == 0:
-        return 0
-    w = max(terminal_width, 1)
-    return (vw + w - 1) // w
 
 
 # ── Inline formatter ────────────────────────────────────────────────────
@@ -219,8 +202,7 @@ class RawReplaceRenderer(Renderer):
         if self._line_buf:
             self._cursor_up_trailing()
             formatted = format_inline(self._line_buf)
-            self._write_clear(formatted)
-            sys.stdout.write("\n")
+            sys.stdout.write(screen_utils.write_line(formatted))
             sys.stdout.flush()
             self._line_buf = ""
             self._last_formatted = ""
@@ -255,14 +237,32 @@ class RawReplaceRenderer(Renderer):
     # ── Cursor helpers ──────────────────────────────────────────────
 
     def _cursor_up_trailing(self) -> None:
-        """Move the cursor up past the multi-line trailing text."""
+        """Move the cursor up to the first screen row of the trailing
+        text.  Assumes the cursor is currently on the *last* row of
+        that text (where ``_rerender_trailing`` left it)."""
         if self._trailing_lines > 1:
-            sys.stdout.write(f"\033[{self._trailing_lines - 1}A")
+            sys.stdout.write(screen_utils.cursor_up(self._trailing_lines - 1))
             sys.stdout.flush()
 
     def _write_clear(self, text: str) -> None:
         """Write *text* from column 0 and clear the rest of the line."""
-        sys.stdout.write(f"\r{text}\033[K")
+        sys.stdout.write(
+            f"{screen_utils.cursor_col0()}{text}{screen_utils.clear_to_eol()}"
+        )
+
+    # ── Pending block helpers ──────────────────────────────────────
+
+    def _flush_pending_blocks(self) -> None:
+        """Flush any accumulated blockquote or table that hasn't been
+        finalised yet.  Safe to call even when no blocks are pending.
+        """
+        if self._bq_lines:
+            self._flush_blockquote()
+        if self._table_lines and self._table_has_sep:
+            self._flush_table()
+        self._table_lines = []
+        self._table_count = 0
+        self._table_has_sep = False
 
     # ── Complete line dispatch ─────────────────────────────────────
 
@@ -282,6 +282,10 @@ class RawReplaceRenderer(Renderer):
         if fm:
             fence_marker = fm.group(1)
             if not self._in_code_block:
+                # Flush any pending table/blockquote before starting a
+                # code fence — otherwise they'd leak into the fence or
+                # be silently dropped.
+                self._flush_pending_blocks()
                 self._start_fence(fence_marker, fm.group(2))
                 self._write_clear(raw_line)
                 sys.stdout.write("\n")
@@ -310,8 +314,17 @@ class RawReplaceRenderer(Renderer):
         # ── Blockquote ─────────────────────────────────────────────
         bqm = _BQ_PAT.match(raw_line)
         if bqm:
+            # Flush any pending table before starting a blockquote —
+            # otherwise a table immediately before a blockquote would
+            # be silently dropped.
+            if self._table_lines and self._table_has_sep:
+                self._flush_table()
+            self._table_lines = []
+            self._table_count = 0
+            self._table_has_sep = False
+
             self._bq_lines.append(raw_line)
-            self._bq_count += _screen_lines(raw_line, self._term_width)
+            self._bq_count += screen_utils.screen_lines(raw_line, self._term_width)
             self._write_clear(raw_line)
             sys.stdout.write("\n")
             sys.stdout.flush()
@@ -327,7 +340,7 @@ class RawReplaceRenderer(Renderer):
             if _TABLE_SEP_PAT.match(raw_line):
                 self._table_has_sep = True
             self._table_lines.append(raw_line)
-            self._table_count += _screen_lines(raw_line, self._term_width)
+            self._table_count += screen_utils.screen_lines(raw_line, self._term_width)
             self._write_clear(raw_line)
             sys.stdout.write("\n")
             sys.stdout.flush()
@@ -377,15 +390,15 @@ class RawReplaceRenderer(Renderer):
         self._write_clear(formatted)
 
         # If the new text is shorter (fewer screen rows), clear the leftover lines
-        new_lines = _screen_lines(formatted, self._term_width)
+        new_lines = screen_utils.screen_lines(formatted, self._term_width)
         old_lines = self._trailing_lines
         if new_lines < old_lines:
-            # We're currently on the first screen line of the trailing text.
-            # Move down to each leftover line and clear it.
-            for _ in range(old_lines - new_lines):
+            diff = old_lines - new_lines
+            # We're currently on the first screen line of the new text.
+            # Move down to each leftover line and clear it, then move back up.
+            for _ in range(diff):
                 sys.stdout.write("\n\033[K")
-            # Move cursor back up to end of the new text
-            sys.stdout.write(f"\033[{old_lines - new_lines}A")
+            sys.stdout.write(screen_utils.cursor_up(diff))
 
         sys.stdout.flush()
         self._trailing_lines = new_lines
@@ -401,7 +414,7 @@ class RawReplaceRenderer(Renderer):
         hm = _HEADING_PAT.match(raw_line)
         if hm:
             level = len(hm.group(1))
-            text = hm.group(2)
+            text = format_inline(hm.group(2))
             color = _HEADING_COLORS.get(level, Colors.BOLD)
             return f"{color}{text}{_RESET}"
 
@@ -437,37 +450,49 @@ class RawReplaceRenderer(Renderer):
         )
 
     def _flush_fence(self) -> None:
+        """Redraw the accumulated fenced code block with box borders."""
         if self._fence is None:
             return
 
-        n = 1 + len(self._fence.raw_lines)
-        if n > 0:
-            sys.stdout.write(f"\033[{n}A")
+        # The screen currently shows: fence-marker line + N raw body lines.
+        # We'll replace them with: header + styled body lines + footer.
+        old_rows = 1 + len(self._fence.raw_lines)  # marker + body
 
-        sys.stdout.write(f"\r{self._fence.header}\033[K\n")
-        for raw in self._fence.raw_lines:
-            sys.stdout.write(f"\r{_DIM}│ {raw}{_RESET}\033[K\n")
-        sys.stdout.write(f"\r{self._fence.footer}\033[K\n")
+        new_lines: list[str] = [self._fence.header]
+        new_lines.extend(
+            f"{_DIM}│ {raw}{_RESET}" for raw in self._fence.raw_lines
+        )
+        new_lines.append(self._fence.footer)
+
+        sys.stdout.write(
+            screen_utils.overwrite_block(old_rows, new_lines, self._term_width)
+        )
         sys.stdout.flush()
 
     # ── Blockquote blocks ──────────────────────────────────────────
 
     def _flush_blockquote(self) -> None:
+        """Redraw accumulated blockquote lines with ``│`` prefix."""
         if not self._bq_lines or self._bq_count == 0:
             self._bq_lines = []
             self._bq_count = 0
             return
 
-        sys.stdout.write(f"\033[{self._bq_count}A")
-
+        new_lines: list[str] = []
         for raw in self._bq_lines:
             bqm = _BQ_PAT.match(raw)
             if bqm:
-                fmt = format_inline(bqm.group(2))
-                sys.stdout.write(f"\r{_DIM}│{_RESET} {fmt}\033[K\n")
+                new_lines.append(
+                    f"{_DIM}│{_RESET} {format_inline(bqm.group(2))}"
+                )
             else:
-                sys.stdout.write(f"\r{_DIM}│{_RESET} {raw}\033[K\n")
+                new_lines.append(f"{_DIM}│{_RESET} {raw}")
 
+        sys.stdout.write(
+            screen_utils.overwrite_block(
+                self._bq_count, new_lines, self._term_width
+            )
+        )
         sys.stdout.flush()
         self._bq_lines = []
         self._bq_count = 0
@@ -498,7 +523,8 @@ class RawReplaceRenderer(Renderer):
 
         ncols = max(len(r) for r in rows)
 
-        # Compute column widths using raw visual length of each cell
+        # Compute column widths using raw cells (before inline formatting,
+        # which only adds ANSI codes with zero visual width).
         col_widths = [3] * ncols
         for row in rows:
             for i, cell in enumerate(row):
@@ -507,41 +533,41 @@ class RawReplaceRenderer(Renderer):
                     if w > col_widths[i]:
                         col_widths[i] = w
 
-        total_width = sum(col_widths) + 3 * ncols + 1
-        if total_width > self._term_width:
-            # If the table is wider than the terminal, cap column widths and let it wrap
-            extra = total_width - self._term_width
-            reduce_per_col = (extra + ncols - 1) // ncols
-            col_widths = [max(3, w - reduce_per_col) for w in col_widths]
+        # ── Pre-compute all redrawn lines ──────────────────────────
 
-        # Build box-drawing rows
         top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
         mid = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
         bot = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
 
-        # Cursor up to start of raw table lines
-        sys.stdout.write(f"\033[{self._table_count}A")
-
-        # Top border
-        sys.stdout.write(f"\r{_DIM}{top}{_RESET}\033[K\n")
+        redrawn_lines: list[str] = [f"{_DIM}{top}{_RESET}"]
 
         for ri, row in enumerate(rows):
-            # Build one formatted row
             parts: list[str] = []
             for ci in range(ncols):
                 cell = row[ci] if ci < len(row) else ""
                 cell_fmt = format_inline(cell)
-                cell_vw = _visual_width(cell_fmt)
+                cell_vw = screen_utils.visual_width(cell_fmt)
                 pad = col_widths[ci] - cell_vw
                 parts.append(f" {cell_fmt}{' ' * pad} ")
 
-            line = f"{_DIM}│{_RESET}" + f"{_DIM}│{_RESET}".join(parts) + f"{_DIM}│{_RESET}"
-            sys.stdout.write(f"\r{line}\033[K\n")
+            line = (
+                f"{_DIM}│{_RESET}"
+                + f"{_DIM}│{_RESET}".join(parts)
+                + f"{_DIM}│{_RESET}"
+            )
+            redrawn_lines.append(line)
 
             # Separator after header row
             if ri == 0:
-                sys.stdout.write(f"\r{_DIM}{mid}{_RESET}\033[K\n")
+                redrawn_lines.append(f"{_DIM}{mid}{_RESET}")
 
-        # Bottom border
-        sys.stdout.write(f"\r{_DIM}{bot}{_RESET}\033[K\n")
+        redrawn_lines.append(f"{_DIM}{bot}{_RESET}")
+
+        # ── Cursor up, write redrawn table, clear leftovers ────────
+
+        sys.stdout.write(
+            screen_utils.overwrite_block(
+                self._table_count, redrawn_lines, self._term_width
+            )
+        )
         sys.stdout.flush()
