@@ -222,7 +222,13 @@ class RawReplaceRenderer(Renderer):
         if not chunk:
             return
 
-        self._in_thinking = False
+        if self._in_thinking:
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+            self._in_thinking = False
+            self._line_buf = ""
+            self._last_formatted = ""
+
         self._line_buf += chunk
 
         # Drain complete lines
@@ -233,6 +239,7 @@ class RawReplaceRenderer(Renderer):
         # Re-render the trailing incomplete line in-place
         if self._line_buf:
             self._rerender_trailing()
+            # screen_utils.rerender_span()
 
     # ── Cursor helpers ──────────────────────────────────────────────
 
@@ -264,6 +271,14 @@ class RawReplaceRenderer(Renderer):
         self._table_count = 0
         self._table_has_sep = False
 
+    def _emit_clear_line(self, raw_line: str) -> None:
+        """Write *raw_line* from column 0, clearing the remainder,
+        and advance to the next terminal row."""
+        self._write_clear(raw_line)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        self._trailing_lines = 0
+
     # ── Complete line dispatch ─────────────────────────────────────
 
     def _emit_complete_line(self, raw_line: str) -> None:
@@ -277,77 +292,108 @@ class RawReplaceRenderer(Renderer):
 
         self._cursor_up_trailing()
 
-        # ── Fenced code ────────────────────────────────────────────
+        if self._handle_fence_line(raw_line):
+            return
+        if self._handle_blockquote_line(raw_line):
+            return
+        if self._handle_table_line(raw_line):
+            return
+        self._emit_normal_line(raw_line)
+
+    # ── Fence line handler ─────────────────────────────────────────
+
+    def _handle_fence_line(self, raw_line: str) -> bool:
+        """If *raw_line* is a fence marker or we're inside a code
+        block, handle it and return ``True``."""
         fm = _FENCE_PAT.match(raw_line)
-        if fm:
+
+        # ── Early Exit  ───────────────────────────────────────────
+        if not fm and not self._in_code_block:
+            return False
+
+        # ── Fence open ───────────────────────────────────────────
+        if fm and not self._in_code_block:
             fence_marker = fm.group(1)
-            if not self._in_code_block:
-                # Flush any pending table/blockquote before starting a
-                # code fence — otherwise they'd leak into the fence or
-                # be silently dropped.
-                self._flush_pending_blocks()
-                self._start_fence(fence_marker, fm.group(2))
-                self._write_clear(raw_line)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-            elif self._fence is not None and self._fence.fence_marker == fence_marker:
-                self._trailing_lines = 0
-                self._flush_fence()
-                self._in_code_block = False
-                self._fence = None
-            else:
-                self._fence.raw_lines.append(raw_line)
-                self._write_clear(raw_line)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-            self._trailing_lines = 0
-            return
-
-        if self._in_code_block and self._fence is not None:
-            self._fence.raw_lines.append(raw_line)
-            self._write_clear(raw_line)
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            self._trailing_lines = 0
-            return
-
-        # ── Blockquote ─────────────────────────────────────────────
-        bqm = _BQ_PAT.match(raw_line)
-        if bqm:
-            # Flush any pending table before starting a blockquote —
-            # otherwise a table immediately before a blockquote would
+            # Flush any pending table/blockquote before starting a
+            # code fence — otherwise they'd leak into the fence or
             # be silently dropped.
-            if self._table_lines and self._table_has_sep:
-                self._flush_table()
-            self._table_lines = []
-            self._table_count = 0
-            self._table_has_sep = False
+            self._flush_pending_blocks()
+            self._start_fence(fence_marker, fm.group(2))
+            self._emit_clear_line(raw_line)
+            return True
 
-            self._bq_lines.append(raw_line)
-            self._bq_count += screen_utils.screen_lines(raw_line, self._term_width)
-            self._write_clear(raw_line)
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+        # ── Fence close ──────────────────────────────────────────
+        # if fm and self._in_code_block and self._fence is not None \
+                # and self._fence.fence_marker == fm.group(1):
+        if fm and self._fence is not None and self._fence.fence_marker == fm.group(1):
             self._trailing_lines = 0
-            return
+            self._flush_fence()
+            self._in_code_block = False
+            self._fence = None
+            # self._trailing_lines = 0
+            return True
 
-        # Blockquote ended — flush the accumulated block
-        if self._bq_lines:
-            self._flush_blockquote()
+        # ── Mismatched or stray fence inside a block ──────────────
+        # if fm and self._in_code_block and self._fence is not None:
+        #     self._fence.raw_lines.append(raw_line)
+        #     self._emit_clear_line(raw_line)
+        #     return True
 
-        # ── Table ──────────────────────────────────────────────────
+        # ── Inside code block  ────────────────────
+        # if self._in_code_block and self._fence is not None:
+        if self._fence is not None:
+            self._fence.raw_lines.append(raw_line)
+            self._emit_clear_line(raw_line)
+            return True
+
+        return True 
+
+    # ── Blockquote line handler ────────────────────────────────────
+
+    def _handle_blockquote_line(self, raw_line: str) -> bool:
+        """If *raw_line* is a blockquote line, accumulate it and
+        return ``True``.  Also flushes any table that may have
+        preceded the blockquote."""
+        bqm = _BQ_PAT.match(raw_line)
+        if not bqm:
+            # Not a blockquote line — flush any accumulated blockquote
+            if self._bq_lines:
+                self._flush_blockquote()
+            return False
+
+        # ── Blockquote start ─────────────────────────────────────
+        # Flush any pending table before starting a blockquote —
+        # otherwise a table immediately before a blockquote would
+        # be silently dropped.
+        if self._table_lines and self._table_has_sep:
+            self._flush_table()
+        self._table_lines = []
+        self._table_count = 0
+        self._table_has_sep = False
+
+        self._bq_lines.append(raw_line)
+        self._bq_count += screen_utils.screen_lines(raw_line, self._term_width)
+        self._emit_clear_line(raw_line)
+        self._trailing_lines = 0
+        return True
+
+    # ── Table line handler ─────────────────────────────────────────
+
+    def _handle_table_line(self, raw_line: str) -> bool:
+        """If *raw_line* looks like a pipe-separated table row,
+        accumulate it and return ``True``.  When a non-table line
+        arrives the accumulated table is flushed."""
         if _TABLE_ROW_PAT.match(raw_line):
             if _TABLE_SEP_PAT.match(raw_line):
                 self._table_has_sep = True
             self._table_lines.append(raw_line)
             self._table_count += screen_utils.screen_lines(raw_line, self._term_width)
-            self._write_clear(raw_line)
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+            self._emit_clear_line(raw_line)
             self._trailing_lines = 0
-            return
+            return True
 
-        # Table ended (confirmed or not)
+        # Not a table row — flush a confirmed table if one was
+        # being accumulated.
         if self._table_lines:
             if self._table_has_sep:
                 self._flush_table()
@@ -356,7 +402,12 @@ class RawReplaceRenderer(Renderer):
             self._table_count = 0
             self._table_has_sep = False
 
-        # ── Normal line ────────────────────────────────────────────
+        return False
+
+    # ── Normal line emission ───────────────────────────────────────
+
+    def _emit_normal_line(self, raw_line: str) -> None:
+        """Format and write a normal (non-block, non-fence) line."""
         formatted = self._format_normal_line(raw_line)
         self._write_clear(formatted)
         sys.stdout.write("\n")
@@ -397,7 +448,9 @@ class RawReplaceRenderer(Renderer):
             # We're currently on the first screen line of the new text.
             # Move down to each leftover line and clear it, then move back up.
             for _ in range(diff):
-                sys.stdout.write("\n\033[K")
+                # sys.stdout.write("\n\033[K")
+                # sys.stdout.write( screen_utils.clear_to_eol() + "\n")
+                sys.stdout.write('\n' + screen_utils.clear_to_eol())
             sys.stdout.write(screen_utils.cursor_up(diff))
 
         sys.stdout.flush()
