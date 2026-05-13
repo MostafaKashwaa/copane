@@ -108,6 +108,11 @@ def clear_line() -> str:
 # ── Composable line-level operations ───────────────────────────────────
 
 
+def write_clear(text: str) -> str:
+    """Write *text* from column 0 and clear the rest of the line."""
+    return f"{cursor_col0()}{text}{clear_to_eol()}"
+
+
 def write_line(text: str) -> str:
     """Escape sequence to write *text* at column 0, clear the rest
     of the visual line, and advance to the next visual line.
@@ -126,7 +131,7 @@ def clear_rest_of_line() -> str:
     return "\033[K\n"
 
 
-# ── Internal: splitting logical lines into screen rows ──────────────────
+# ── Internal: splitting logical lines into screen rows ────────────────
 
 
 def _is_wide(ch: str) -> bool:
@@ -225,7 +230,7 @@ def overwrite_block(
     return "".join(parts)
 
 
-# ── In-place re-render (trailing text) ─────────────────────────────────
+# ── In-place re-render ────────────────────────────────────────────────
 
 
 def rerender_in_place(
@@ -243,6 +248,13 @@ def rerender_in_place(
     leftover-line clearing, and *new_screen_lines* is the screen
     row count of *new_text* for the caller to store for the next
     invocation.
+
+    .. note::
+
+       This function advances the cursor past the output
+       (``write_line`` ends with ``\\n``).  For in-place updates
+       that must **not** advance the cursor (trailing incomplete
+       lines), use ``rerender_span`` instead.
     """
     new_sl = screen_lines(new_text, term_width)
 
@@ -260,6 +272,106 @@ def rerender_in_place(
     leftover = old_screen_lines - new_sl
     if leftover > 0:
         parts.append(clear_rest_of_line() * leftover)
+
+    return ("".join(parts), new_sl)
+
+
+def cursor_up_trailing(n_trailing_lines: int) -> str:
+    """Move the cursor up to the first screen row of a trailing
+    span that occupies *n_trailing_lines* rows.
+
+    **Pre-condition:** The cursor is on the *last* screen row of
+    that span.
+
+    Equivalent to ``cursor_up(n_trailing_lines - 1)``.  Returns an
+    empty string if *n_trailing_lines* <= 1.
+    """
+    if n_trailing_lines <= 1:
+        return ""
+    return cursor_up(n_trailing_lines - 1)
+
+
+def rerender_span(
+    old_screen_lines: int,
+    new_text: str,
+    term_width: int,
+) -> tuple[str, int]:
+    """In-place replacement of a trailing (incomplete-line) span.
+
+    **Pre-condition:** The cursor is on the *last* screen row of
+    the old span.
+    **Post-condition:** The cursor is on the *first* screen row of
+    the new span (or where the old span started if ``new_text`` is
+    empty).
+
+    Unlike ``rerender_in_place``, this function does **not** advance
+    the cursor with a trailing newline, making it suitable for live
+    trailing-line updates that will be overwritten by the next chunk.
+
+    Returns ``(escape_sequence, new_screen_lines)``.
+    """
+    new_sl = screen_lines(new_text, term_width)
+
+    if old_screen_lines <= 0 and new_sl == 0:
+        return ("", 0)
+
+    parts: list[str] = []
+
+    # Move cursor up to the first row of the old span
+    if old_screen_lines > 0:
+        parts.append(cursor_up_trailing(old_screen_lines))
+
+    # Write the new text
+    if new_sl > 0:
+        # Split into screen rows manually so we can write each row
+        # with write_clear (no advancing newline) and separate rows
+        # with a manual \n.
+        if "\033[" in new_text:
+            # Fallback: let the terminal wrap.  The terminal will
+            # position the cursor at the end of the wrapped text.
+            parts.append(write_clear(new_text))
+            # If text wrapped, cursor is now on the last screen row
+            # of the new text.  We need to move back up.
+            if new_sl > 1:
+                parts.append(cursor_up(new_sl - 1))
+        elif new_sl == 1:
+            parts.append(write_clear(new_text))
+        else:
+            # Multi-row without ANSI — split manually to control
+            # \n placement for leftover clearing.
+            plain = _strip_ansi(new_text)
+            rows = _split_to_screen_rows(plain, term_width)
+            for i, row in enumerate(rows):
+                parts.append(write_clear(row))
+                if i < len(rows) - 1:
+                    parts.append("\n")
+            # Move cursor back to the first row
+            if len(rows) > 1:
+                parts.append(cursor_up(len(rows) - 1))
+
+    # Clear leftover rows if new text is shorter than old.
+    #
+    # After the write phase, the cursor is on the *first* screen row
+    # of the new text (moved back up by the cursor_up above).  The
+    # leftover rows are the rows of the old text that extend *below*
+    # the new text — those are at position new_sl..old_sl-1.
+    #
+    # We need to advance down from row 0 to the first leftover row
+    # (row new_sl), clear each one, then return to row 0.
+    leftover = old_screen_lines - new_sl
+    if leftover > 0:
+        # Advance from current row (0) down to the first leftover row
+        if new_sl > 0:
+            parts.append("\n" * new_sl)
+        # Clear each leftover row
+        for _ in range(leftover):
+            parts.append(write_clear(""))
+            if _ < leftover - 1:
+                parts.append("\n")
+        # Move cursor back up to row 0 of the span
+        rows_up = new_sl + leftover - 1
+        if rows_up > 0:
+            parts.append(cursor_up(rows_up))
 
     return ("".join(parts), new_sl)
 

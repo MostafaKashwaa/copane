@@ -484,3 +484,92 @@ class TestClearLogicalLine:
         result = screen_utils.clear_logical_line(5)
         assert "\t" not in result
         assert "\b" not in result
+
+
+# ======================================================================
+# write_clear
+# ======================================================================
+
+
+class TestWriteClear:
+    """``write_clear(text) → str``
+
+    ``write_clear`` writes *text* from column 0 and clears the rest of
+    the line, but does **not** advance the cursor to the next line.
+    This is the key difference from ``write_line``, which appends a
+    trailing ``\\n``.
+    """
+
+    # ── basic structure ────────────────────────────────────────────
+
+    def test_plain_text(self):
+        result = screen_utils.write_clear("hello")
+        assert result == "\rhello\033[K"
+
+    def test_empty_text(self):
+        result = screen_utils.write_clear("")
+        assert result == "\r\033[K"
+
+    def test_starts_with_carriage_return(self):
+        result = screen_utils.write_clear("abc")
+        assert result.startswith("\r")
+
+    def test_ends_with_el(self):
+        result = screen_utils.write_clear("abc")
+        assert result.endswith("\033[K")
+
+    def test_no_newline(self):
+        """``write_clear`` must not advance the cursor."""
+        assert "\n" not in screen_utils.write_clear("any text")
+
+    def test_cr_before_text_before_el(self):
+        result = screen_utils.write_clear("xyz")
+        cr = result.index("\r")
+        tx = result.index("xyz")
+        el = result.index("\033[K")
+        assert cr < tx < el
+
+    # ── text with ANSI codes ───────────────────────────────────────
+
+    def test_text_with_ansi_preserved(self):
+        result = screen_utils.write_clear("\033[1mhi\033[0m")
+        assert "\033[1mhi\033[0m" in result
+
+    def test_exactly_one_ansi_escape_in_plain_text(self):
+        # write_clear adds one EL; no cursor-up
+        result = screen_utils.write_clear("hello")
+        assert _count_ansi_escapes(result) == 1
+
+    def test_ansi_codes_count_with_text(self):
+        # text has 2 ansi codes + one EL from write_clear = 3
+        result = screen_utils.write_clear("\033[1m\033[31mhello")
+        assert _count_ansi_escapes(result) == 3
+
+    # ── edge cases ─────────────────────────────────────────────────
+
+    def test_returns_string(self):
+        assert isinstance(screen_utils.write_clear(""), str)
+
+    def test_idempotent(self):
+        assert screen_utils.write_clear("hello") == screen_utils.write_clear("hello")
+
+    def test_newline_in_text_is_preserved(self):
+        # write_clear does NOT strip or replace \n in the text itself
+        result = screen_utils.write_clear("a\nb")
+        assert "a\nb" in result
+
+    def test_tab_in_text_is_preserved(self):
+        result = screen_utils.write_clear("a\tb")
+        assert "a\tb" in result
+
+    def test_wide_chars_dont_affect_escape_structure(self):
+        result = screen_utils.write_clear("你好")
+        assert result == "\r你好\033[K"
+
+    def test_no_backspace(self):
+        assert "\b" not in screen_utils.write_clear("test")
+
+    def test_not_ending_with_newline(self):
+        """Explicitly verify no trailing \\n unlike write_line."""
+        result = screen_utils.write_clear("hello")
+        assert not result.endswith("\n")
