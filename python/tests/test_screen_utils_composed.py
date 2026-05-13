@@ -505,3 +505,299 @@ class TestRerenderInPlace:
         # verify the sequence doesn't end mid-row.
         seq, _ = screen_utils.rerender_in_place("old", 2, "new", 80)
         assert seq.endswith("\n")
+
+
+# ======================================================================
+# cursor_up_trailing
+# ======================================================================
+
+
+class TestCursorUpTrailing:
+    """``cursor_up_trailing(n_trailing_lines) → str``
+
+    Moves the cursor up to the first screen row of a trailing span
+    that occupies *n_trailing_lines* rows, given that the cursor is
+    currently on the **last** row of that span.
+
+    Equivalent to ``cursor_up(n_trailing_lines - 1)`` (with guarding).
+    """
+
+    def test_zero_is_noop(self):
+        assert screen_utils.cursor_up_trailing(0) == ""
+
+    def test_one_is_noop(self):
+        """Cursor already on the first (and only) row — no movement."""
+        assert screen_utils.cursor_up_trailing(1) == ""
+
+    def test_two_goes_up_one(self):
+        result = screen_utils.cursor_up_trailing(2)
+        assert result == "\033[1A"
+
+    def test_ten_goes_up_nine(self):
+        result = screen_utils.cursor_up_trailing(10)
+        assert result == "\033[9A"
+
+    def test_negative_treated_as_zero(self):
+        result = screen_utils.cursor_up_trailing(-3)
+        assert result == ""
+
+    def test_no_carriage_return(self):
+        """Does not change column — should not contain ``\\r``."""
+        assert "\r" not in screen_utils.cursor_up_trailing(5)
+
+    def test_exactly_one_ansi_escape_when_moving(self):
+        assert _count_ansi_escapes(screen_utils.cursor_up_trailing(5)) == 1
+
+    def test_no_ansi_escape_when_no_movement(self):
+        assert _count_ansi_escapes(screen_utils.cursor_up_trailing(0)) == 0
+        assert _count_ansi_escapes(screen_utils.cursor_up_trailing(1)) == 0
+
+    def test_returns_string(self):
+        assert isinstance(screen_utils.cursor_up_trailing(3), str)
+
+    def test_idempotent(self):
+        assert screen_utils.cursor_up_trailing(4) == screen_utils.cursor_up_trailing(4)
+
+
+# ======================================================================
+# rerender_span
+# ======================================================================
+
+
+class TestRerenderSpan:
+    """``rerender_span(old_screen_lines, new_text, term_width) → tuple[str, int]``
+
+    In-place replacement of a trailing (incomplete-line) span that occupies
+    *old_screen_lines* screen rows on the terminal.
+
+    **Pre-condition:** Cursor is on the *last* screen row of the old span.
+    **Post-condition:** Cursor is on the *first* screen row of the new span
+    (or where the old span started, if ``new_text`` is empty). Column is
+    **not** guaranteed (caller should use ``\\r`` before writing if needed).
+
+    Returns a tuple ``(escape_sequence, new_screen_lines)``.
+    """
+
+    # ── nothing to do ─────────────────────────────────────────────
+
+    def test_nothing_to_do(self):
+        seq, n = screen_utils.rerender_span(0, "", 80)
+        assert n == 0
+        assert seq == ""
+
+    # ── fresh write (old_screen_lines = 0) ─────────────────────────
+
+    def test_fresh_write_one_row(self):
+        seq, n = screen_utils.rerender_span(0, "hello", 80)
+        assert n == 1
+        # No cursor-up needed.  Just write_clear.
+        assert seq == "\rhello\033[K"
+
+    def test_fresh_write_empty_text(self):
+        seq, n = screen_utils.rerender_span(0, "", 80)
+        assert n == 0
+        assert seq == ""
+
+    def test_fresh_write_ansi_text(self):
+        seq, n = screen_utils.rerender_span(0, "\033[1mhi\033[0m", 80)
+        assert n == 1
+        assert "\033[1mhi\033[0m" in seq
+        assert "\033[A" not in seq
+        assert "\n" not in seq
+
+    def test_fresh_write_wrapped_text(self):
+        """Text wraps to 2 screen rows with no old content."""
+        seq, n = screen_utils.rerender_span(0, "x" * 90, 80)
+        assert n == 2
+        # Must write 2 rows with a newline between them (to advance cursor),
+        # then move back up 1 row to return cursor to the first row.
+        assert "\n" in seq  # rows separated by newline
+        # After the second row, cursor must go back up to first row.
+        assert "\033[1A" in seq or "\033[A" in seq
+
+    def test_fresh_write_wrapped_text_returns_cursor_to_first_row(self):
+        """Post-condition check: cursor is on the first row of new text."""
+        seq, n = screen_utils.rerender_span(0, "x" * 90, 80)
+        assert n == 2
+        # Strategy: the sequence should end with \033[1A\r or just \033[1A
+        # to position cursor on the first row of the 2-row span.
+        assert seq.rstrip("\r").endswith("\033[1A") or seq.rstrip("\r").endswith("\033[A")
+
+    # ── exact fit (same rows before and after) ─────────────────────
+
+    def test_exact_fit_one_row(self):
+        seq, n = screen_utils.rerender_span(1, "new", 80)
+        assert n == 1
+        # Cursor was on last row of old (same row). Move up 0… actually
+        # old_sl=1 means cursor is on row R+0, which IS the first row.
+        # So cursor_up_trailing(1) = "". Write_clear.
+        assert seq == "\rnew\033[K"
+
+    def test_exact_fit_two_rows_wrap(self):
+        seq, n = screen_utils.rerender_span(2, "x" * 90, 80)
+        assert n == 2
+        # Move up 1 (cursor_up_trailing(2) = \033[1A), write 2 rows
+        # with newline between, then move back up 1 to return cursor
+        # to the first row.
+        assert seq.startswith("\033[1A")
+        assert seq.endswith("\033[1A") or seq.endswith("\033[A")
+        assert n == 2
+
+    # ── shrink (old > new) ─────────────────────────────────────────
+
+    def test_shrink_one_to_empty(self):
+        seq, n = screen_utils.rerender_span(1, "", 80)
+        assert n == 0
+        # Cursor is on the old row (only row). Move up 0? old_sl=1,
+        # so cursor_up_trailing(1) = "".  Clear the line.
+        assert seq == "\r\033[K"
+
+    def test_shrink_two_to_one(self):
+        seq, n = screen_utils.rerender_span(2, "short", 80)
+        assert n == 1
+        # cursor_up_trailing(2) = \033[1A, write_clear, clear 1 leftover,
+        # cursor back to first row.
+        assert seq.startswith("\033[1A")
+        assert "\rshort\033[K" in seq
+        assert "\033[K" in seq  # leftover clearing
+        # Post-condition: cursor on first (only) row.
+
+    def test_shrink_three_to_one(self):
+        seq, n = screen_utils.rerender_span(3, "x", 80)
+        assert n == 1
+        # cursor_up_trailing(3) = \033[2A, write_clear, clear 2 leftovers,
+        # cursor back to first row.
+        assert seq.startswith("\033[2A")
+        assert "\rx\033[K" in seq
+        # 2 leftover clearings
+        assert seq.count("\033[K") >= 3  # write_clear EL + 2 leftover ELs
+
+    def test_shrink_three_to_two(self):
+        seq, n = screen_utils.rerender_span(3, "a" * 90, 80)
+        assert n == 2
+        # cursor_up_trailing(3) = \033[2A, write 2 wrapped rows,
+        # clear 1 leftover, cursor back to first row.
+        assert seq.startswith("\033[2A")
+        assert n == 2
+
+    def test_shrink_one_to_empty_no_leftover(self):
+        """Shrinking to empty should clear the single row and stay there."""
+        seq, n = screen_utils.rerender_span(1, "", 80)
+        assert n == 0
+        assert seq == "\r\033[K"  # just clear_line
+
+    # ── grow (old < new) ───────────────────────────────────────────
+
+    def test_grow_one_to_two_wrap(self):
+        seq, n = screen_utils.rerender_span(1, "x" * 90, 80)
+        assert n == 2
+        # cursor_up_trailing(1) = "", write 2 rows with \n between,
+        # cursor back up to first row.
+        assert "\n" in seq
+        assert seq.endswith("\033[1A") or seq.endswith("\033[A")
+        assert "\033[K" in seq
+
+    def test_grow_one_to_three_wrap(self):
+        seq, n = screen_utils.rerender_span(1, "x" * 170, 80)
+        assert n == 3
+        assert seq.endswith("\033[2A") or seq.endswith("\033[A" * 2)
+
+    # ── wide characters (CJK) ─────────────────────────────────────
+
+    def test_wide_char_one_row(self):
+        seq, n = screen_utils.rerender_span(0, "好" * 39, 80)
+        assert n == 1  # 78 cells = 1 row
+
+    def test_wide_char_two_rows_wrap(self):
+        seq, n = screen_utils.rerender_span(0, "好" * 50, 80)
+        assert n == 2  # 100 cells = 2 rows
+
+    def test_wide_char_straddling_boundary(self):
+        # 79 a's + 1 "好" = 79 + 2 = 81 cells → 2 rows at width 80
+        seq, n = screen_utils.rerender_span(0, "a" * 79 + "好", 80)
+        assert n == 2
+
+    def test_wide_char_replacing_exact_fit(self):
+        seq, n = screen_utils.rerender_span(1, "你好", 80)
+        assert n == 1  # 4 cells, 1 row
+
+    # ── ANSI codes ─────────────────────────────────────────────────
+
+    def test_ansi_does_not_inflate_row_count(self):
+        _, n = screen_utils.rerender_span(0, "\033[1mhello\033[0m", 80)
+        assert n == 1
+
+    def test_ansi_preserved_in_output(self):
+        seq, _ = screen_utils.rerender_span(0, "\033[1mhi\033[0m", 80)
+        assert "\033[1mhi\033[0m" in seq
+
+    def test_ansi_with_wrapping(self):
+        # 90 visible chars + ANSI → 2 rows, ANSI codes don't affect
+        seq, n = screen_utils.rerender_span(
+            0, "\033[1m" + "x" * 90 + "\033[0m", 80
+        )
+        assert n == 2
+
+    # ── edge cases ─────────────────────────────────────────────────
+
+    def test_negative_old_screen_lines_treated_as_zero(self):
+        seq, n = screen_utils.rerender_span(-1, "hello", 80)
+        assert n == 1
+        assert "\033[-" not in seq
+
+    def test_term_width_zero_treated_as_one(self):
+        seq, n = screen_utils.rerender_span(0, "abc", 0)
+        assert n == 3  # width=1, 3 chars = 3 rows
+        assert isinstance(seq, str)
+
+    def test_term_width_negative_treated_as_one(self):
+        _, n = screen_utils.rerender_span(0, "ab", -5)
+        assert n == 2
+
+    def test_returns_tuple_of_str_and_int(self):
+        result = screen_utils.rerender_span(0, "hello", 80)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], str)
+        assert isinstance(result[1], int)
+
+    def test_idempotent(self):
+        a = screen_utils.rerender_span(1, "hello", 80)
+        b = screen_utils.rerender_span(1, "hello", 80)
+        assert a == b
+
+    def test_no_backspace(self):
+        seq, _ = screen_utils.rerender_span(0, "hello", 80)
+        assert "\b" not in seq
+
+    def test_no_stray_tabs(self):
+        seq, _ = screen_utils.rerender_span(0, "hello", 80)
+        assert "\t" not in seq
+
+    def test_no_trailing_newline(self):
+        """Unlike rerender_in_place, rerender_span should NOT advance
+        the cursor with a trailing newline at the end."""
+        seq, _ = screen_utils.rerender_span(0, "hello", 80)
+        assert not seq.endswith("\n")
+
+    def test_large_old_screen_lines(self):
+        seq, n = screen_utils.rerender_span(100, "small", 80)
+        assert n == 1
+        # Must move up 99 to reach first row of the 100-row span
+        assert seq.startswith("\033[99A")
+
+    def test_very_long_new_text(self):
+        seq, n = screen_utils.rerender_span(0, "x" * 1000, 80)
+        assert n == 13  # 1000 / 80 = 12.5 → 13 rows
+        assert isinstance(seq, str)
+        assert len(seq) > 0
+
+    def test_empty_new_text_with_multiple_old_rows(self):
+        seq, n = screen_utils.rerender_span(5, "", 80)
+        assert n == 0
+        # cursor_up_trailing(5) = \033[4A, clear 5 rows
+        assert seq.startswith("\033[4A")
+        # Should clear all 5 rows (each with \033[K\n or similar)
+        # and end with cursor on the first row of the cleared span.
+        # No newline at end.
+        assert not seq.endswith("\n")
