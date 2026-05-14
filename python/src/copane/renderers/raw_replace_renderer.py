@@ -37,92 +37,7 @@ from copane.renderers._state_machine import (
     State,
 )
 from copane.term_styles import Colors
-
-# ── ANSI style fragments ────────────────────────────────────────────────
-
-_BOLD_ON = "\033[1m"
-_BOLD_OFF = "\033[22m"
-_ITALIC_ON = "\033[3m"
-_ITALIC_OFF = "\033[23m"
-_STRIKE_ON = "\033[9m"
-_STRIKE_OFF = "\033[29m"
-_CODE_BG = "\033[48;5;235m"
-_CODE_FG = "\033[38;5;51m"
-_CODE_OFF = "\033[0m"
-_LINK_STYLE = f"{Colors.INFO}{Colors.UNDERLINE}"
-_LINK_OFF = Colors.RESET
-_DIM = Colors.DIM
-_RESET = Colors.RESET
-
-# ── Inline patterns (one capture group for content) ─────────────────────
-
-_BOLD_ITALIC_PAT = re.compile(r"\*\*\*(.+?)\*\*\*")  # ***bold-italic***
-_BOLD_PAT = re.compile(r"\*\*(.+?)\*\*")              # **bold**
-_ITALIC_PAT = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")  # *italic*
-_INLINE_CODE_PAT = re.compile(r"`([^`\n]+?)`")         # `code`
-_STRIKE_PAT = re.compile(r"~~(.+?)~~")                 # ~~strikethrough~~
-_LINK_PAT = re.compile(r"\[([^\]]+?)\]\([^)]+?\)")     # [text](url)
-
-# Block-level patterns
-_HR_PAT = re.compile(r"^[-*_]{3,}\s*$")
-_HEADING_PAT = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-_UNORDERED_LIST_PAT = re.compile(r"^(\s*)([-*+])\s+(.+)$")
-_ORDERED_LIST_PAT = re.compile(r"^(\s*)(\d+\.)\s+(.+)$")
-
-_HEADING_COLORS: dict[int, str] = {
-    1: f"{Colors.PRIMARY}{Colors.BOLD}",
-    2: f"{Colors.SECONDARY}{Colors.BOLD}",
-    3: f"{Colors.ACCENT}{Colors.BOLD}",
-    4: f"{Colors.INFO}{Colors.BOLD}",
-    5: Colors.BOLD,
-    6: Colors.BOLD,
-}
-
-
-# ── Inline formatter ────────────────────────────────────────────────────
-
-
-def format_inline(line: str) -> str:
-    """Apply all inline markdown patterns to a single line.
-
-    Incomplete spans (e.g. ``**bold`` without closing ``**``) are
-    left as raw text — this is what makes the streaming
-    raw-then-format effect work without writing duplicate text.
-    """
-    # Bold-italic ***text*** (must run before **bold**)
-    line = _BOLD_ITALIC_PAT.sub(
-        lambda m: f"{_BOLD_ON}{_ITALIC_ON}{m.group(1)}{_ITALIC_OFF}{_BOLD_OFF}",
-        line,
-    )
-    # Bold **text**
-    line = _BOLD_PAT.sub(
-        lambda m: f"{_BOLD_ON}{m.group(1)}{_BOLD_OFF}",
-        line,
-    )
-    # Strikethrough ~~text~~
-    line = _STRIKE_PAT.sub(
-        lambda m: f"{_STRIKE_ON}{m.group(1)}{_STRIKE_OFF}",
-        line,
-    )
-    # Inline code `text`
-    line = _INLINE_CODE_PAT.sub(
-        lambda m: f"{_CODE_BG}{_CODE_FG}{m.group(1)}{_CODE_OFF}",
-        line,
-    )
-    # Italic *text*  (after bold to avoid matching ** fragments)
-    line = _ITALIC_PAT.sub(
-        lambda m: f"{_ITALIC_ON}{m.group(1)}{_ITALIC_OFF}",
-        line,
-    )
-    # Links [text](url)
-    line = _LINK_PAT.sub(
-        lambda m: f"{_LINK_STYLE}{m.group(1)}{_LINK_OFF}",
-        line,
-    )
-    return line
-
-
-# ── Renderer ────────────────────────────────────────────────────────────
+from copane.renderers._inline_formatting import format_inline, _DIM, _RESET
 
 
 class RawReplaceRenderer(Renderer):
@@ -147,7 +62,7 @@ class RawReplaceRenderer(Renderer):
         self._last_formatted: str = ""
         self._term_width: int = 80
         self._trailing_lines: int = 0  # screen rows occupied by the trailing text
-        self._state: State = NormalState()
+        self._state: State = NormalState(self)
         self._in_thinking: bool = False
 
     # ── Lifecycle ───────────────────────────────────────────────────
@@ -157,7 +72,7 @@ class RawReplaceRenderer(Renderer):
         self._last_formatted = ""
         self._term_width = shutil.get_terminal_size().columns
         self._trailing_lines = 0
-        self._state = NormalState()
+        self._state = NormalState(self)
         self._in_thinking = False
 
     def on_response_complete(self) -> None:
@@ -166,7 +81,7 @@ class RawReplaceRenderer(Renderer):
         # Flush any open block state (fence, blockquote, table)
         result = self._state.flush(self._term_width)
         if result is not None:
-            self._apply_result(result, "")
+            self._apply_result(result)
 
         if self._line_buf:
             self._cursor_up_trailing()
@@ -233,20 +148,19 @@ class RawReplaceRenderer(Renderer):
         sys.stdout.flush()
         self._trailing_lines = 0
 
-    # ── Complete line dispatch ─────────────────────────────────────
+    # ── State transition ───────────────────────────────────────────
 
-    def _apply_result(self, result: LineResult, raw_line: str) -> None:
+    def set_state(self, new_state: State) -> None:
+        self._state = new_state
+
+    # ── Result dispatch ────────────────────────────────────────────
+
+    def _apply_result(self, result: LineResult) -> None:
         """Execute the I/O actions described by a ``LineResult``,
-        then transition state if requested.
-
-        If the result has ``consumed=False``, the *raw_line* is
-        re-dispatched to the new state.
-        """
-        # 1. Write body text from column 0
+        then re-dispatch ``replay_line`` if set."""
         if result.body:
             self._emit_line(result.body)
 
-        # 2. Redraw a block (fence close, blockquote end, table end)
         if result.redraw_target is not None:
             sys.stdout.write(
                 screen_utils.overwrite_block(
@@ -257,14 +171,8 @@ class RawReplaceRenderer(Renderer):
             )
             sys.stdout.flush()
 
-        # 3. Transition state
-        if result.new_state is not None:
-            self._state = result.new_state()
-            self._state.on_enter(raw_line, self._term_width)
-
-        # 4. Line not consumed — re-dispatch to the new state
-        if not result.consumed:
-            self._emit_complete_line(raw_line)
+        if result.replay_line is not None:
+            self._emit_complete_line(result.replay_line)
 
     def _emit_complete_line(self, raw_line: str) -> None:
         """Finalize a complete line (a ``\\n`` just arrived).
@@ -276,7 +184,7 @@ class RawReplaceRenderer(Renderer):
         """
         self._cursor_up_trailing()
         result = self._state.handle_line(raw_line, self._term_width)
-        self._apply_result(result, raw_line)
+        self._apply_result(result)
 
     # ── Trailing line re-render ────────────────────────────────────
 
@@ -319,32 +227,3 @@ class RawReplaceRenderer(Renderer):
         self._trailing_lines = new_lines
         self._last_formatted = formatted
 
-    # ── Normal line formatting ─────────────────────────────────────
-
-    def _format_normal_line(self, raw_line: str) -> str:
-        """Return the ANSI-formatted version of a normal line."""
-        if _HR_PAT.match(raw_line):
-            return f"{_DIM}{'─' * self._term_width}{_RESET}"
-
-        hm = _HEADING_PAT.match(raw_line)
-        if hm:
-            level = len(hm.group(1))
-            text = format_inline(hm.group(2))
-            color = _HEADING_COLORS.get(level, Colors.BOLD)
-            return f"{color}{text}{_RESET}"
-
-        ulm = _UNORDERED_LIST_PAT.match(raw_line)
-        if ulm:
-            indent = ulm.group(1)
-            bullet = ulm.group(2)
-            text = format_inline(ulm.group(3))
-            return f"{indent}{Colors.ACCENT}{bullet}{_RESET} {text}"
-
-        olm = _ORDERED_LIST_PAT.match(raw_line)
-        if olm:
-            indent = olm.group(1)
-            num = olm.group(2)
-            text = format_inline(olm.group(3))
-            return f"{indent}{Colors.INFO}{num}{_RESET} {text}"
-
-        return format_inline(raw_line)
