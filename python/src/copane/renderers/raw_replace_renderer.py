@@ -15,6 +15,11 @@ and are redrawn with styling on close via cursor-up-and-redraw.
 Uses ``copane.screen_utils`` for cursor escapes, measurement, and
 composable block-level operations (``overwrite_block``,
 ``rerender_in_place``).
+
+Block dispatch is handled by a pluggable state machine
+(``_state_machine.py``).  Adding a new block type means writing a
+new ``State`` subclass and wiring it into ``NormalState`` — no
+changes to the renderer's dispatch loop.
 """
 
 from __future__ import annotations
@@ -22,10 +27,15 @@ from __future__ import annotations
 import re
 import shutil
 import sys
-from dataclasses import dataclass
 
 from copane import screen_utils
 from copane.renderers._base import Renderer
+from copane.renderers._state_machine import (
+    FenceState,
+    LineResult,
+    NormalState,
+    State,
+)
 from copane.term_styles import Colors
 
 # ── ANSI style fragments ────────────────────────────────────────────────
@@ -54,16 +64,10 @@ _STRIKE_PAT = re.compile(r"~~(.+?)~~")                 # ~~strikethrough~~
 _LINK_PAT = re.compile(r"\[([^\]]+?)\]\([^)]+?\)")     # [text](url)
 
 # Block-level patterns
-_FENCE_PAT = re.compile(r"^(```|~~~)\s*(\S*)$")
 _HR_PAT = re.compile(r"^[-*_]{3,}\s*$")
-_BQ_PAT = re.compile(r"^(>\s?)(.*)$")
 _HEADING_PAT = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _UNORDERED_LIST_PAT = re.compile(r"^(\s*)([-*+])\s+(.+)$")
 _ORDERED_LIST_PAT = re.compile(r"^(\s*)(\d+\.)\s+(.+)$")
-
-# Table patterns
-_TABLE_ROW_PAT = re.compile(r"^\s*\|.*\|\s*$")
-_TABLE_SEP_PAT = re.compile(r"^\s*\|[\s\-:|]+\|\s*$")
 
 _HEADING_COLORS: dict[int, str] = {
     1: f"{Colors.PRIMARY}{Colors.BOLD}",
@@ -121,16 +125,6 @@ def format_inline(line: str) -> str:
 # ── Renderer ────────────────────────────────────────────────────────────
 
 
-@dataclass
-class _FenceState:
-    """Track an open fenced code block for later redraw."""
-
-    header: str              # top box-drawing line
-    footer: str              # bottom box-drawing line
-    fence_marker: str        # ``` or ~~~
-    raw_lines: list[str]     # accumulated raw body lines
-
-
 class RawReplaceRenderer(Renderer):
     """Stream markdown with in-place span resolution.
 
@@ -153,20 +147,7 @@ class RawReplaceRenderer(Renderer):
         self._last_formatted: str = ""
         self._term_width: int = 80
         self._trailing_lines: int = 0  # screen rows occupied by the trailing text
-
-        # Code fence state
-        self._in_code_block: bool = False
-        self._fence: _FenceState | None = None
-
-        # Blockquote state
-        self._bq_lines: list[str] = []
-        self._bq_count: int = 0
-
-        # Table state
-        self._table_lines: list[str] = []    # accumulated raw rows (incl. separator)
-        self._table_count: int = 0           # screen lines occupied by raw table
-        self._table_has_sep: bool = False    # separator row seen → confirmed table
-
+        self._state: State = NormalState()
         self._in_thinking: bool = False
 
     # ── Lifecycle ───────────────────────────────────────────────────
@@ -176,28 +157,16 @@ class RawReplaceRenderer(Renderer):
         self._last_formatted = ""
         self._term_width = shutil.get_terminal_size().columns
         self._trailing_lines = 0
-        self._in_code_block = False
-        self._fence = None
-        self._bq_lines = []
-        self._bq_count = 0
-        self._table_lines = []
-        self._table_count = 0
-        self._table_has_sep = False
+        self._state = NormalState()
         self._in_thinking = False
 
     def on_response_complete(self) -> None:
         self._in_thinking = False
 
-        if self._in_code_block and self._fence is not None:
-            self._flush_fence()
-            self._in_code_block = False
-            self._fence = None
-
-        if self._bq_lines:
-            self._flush_blockquote()
-
-        if self._table_lines and self._table_has_sep:
-            self._flush_table()
+        # Flush any open block state (fence, blockquote, table)
+        result = self._state.flush(self._term_width)
+        if result is not None:
+            self._apply_result(result, "")
 
         if self._line_buf:
             self._cursor_up_trailing()
@@ -239,7 +208,6 @@ class RawReplaceRenderer(Renderer):
         # Re-render the trailing incomplete line in-place
         if self._line_buf:
             self._rerender_trailing()
-            # screen_utils.rerender_span()
 
     # ── Cursor helpers ──────────────────────────────────────────────
 
@@ -257,162 +225,58 @@ class RawReplaceRenderer(Renderer):
             f"{screen_utils.cursor_col0()}{text}{screen_utils.clear_to_eol()}"
         )
 
-    # ── Pending block helpers ──────────────────────────────────────
-
-    def _flush_pending_blocks(self) -> None:
-        """Flush any accumulated blockquote or table that hasn't been
-        finalised yet.  Safe to call even when no blocks are pending.
-        """
-        if self._bq_lines:
-            self._flush_blockquote()
-        if self._table_lines and self._table_has_sep:
-            self._flush_table()
-        self._table_lines = []
-        self._table_count = 0
-        self._table_has_sep = False
-
-    def _emit_clear_line(self, raw_line: str) -> None:
-        """Write *raw_line* from column 0, clearing the remainder,
-        and advance to the next terminal row."""
-        self._write_clear(raw_line)
+    def _emit_line(self, text: str) -> None:
+        """Write *text* from column 0, clear remainder, advance to
+        the next terminal row."""
+        self._write_clear(text)
         sys.stdout.write("\n")
         sys.stdout.flush()
         self._trailing_lines = 0
 
     # ── Complete line dispatch ─────────────────────────────────────
 
+    def _apply_result(self, result: LineResult, raw_line: str) -> None:
+        """Execute the I/O actions described by a ``LineResult``,
+        then transition state if requested.
+
+        If the result has ``consumed=False``, the *raw_line* is
+        re-dispatched to the new state.
+        """
+        # 1. Write body text from column 0
+        if result.body:
+            self._emit_line(result.body)
+
+        # 2. Redraw a block (fence close, blockquote end, table end)
+        if result.redraw_target is not None:
+            sys.stdout.write(
+                screen_utils.overwrite_block(
+                    result.previous_screen_rows,
+                    result.redraw_target,
+                    self._term_width,
+                )
+            )
+            sys.stdout.flush()
+
+        # 3. Transition state
+        if result.new_state is not None:
+            self._state = result.new_state()
+            self._state.on_enter(raw_line, self._term_width)
+
+        # 4. Line not consumed — re-dispatch to the new state
+        if not result.consumed:
+            self._emit_complete_line(raw_line)
+
     def _emit_complete_line(self, raw_line: str) -> None:
         """Finalize a complete line (a ``\\n`` just arrived).
 
         The trailing formatted text from the previous
         ``_rerender_trailing()`` call may span multiple terminal
-        rows, so we move the cursor up first, then overwrite from
-        column 0.
+        rows, so we move the cursor up first, then dispatch to
+        the current state machine.
         """
-
         self._cursor_up_trailing()
-
-        if self._handle_fence_line(raw_line):
-            return
-        if self._handle_blockquote_line(raw_line):
-            return
-        if self._handle_table_line(raw_line):
-            return
-        self._emit_normal_line(raw_line)
-
-    # ── Fence line handler ─────────────────────────────────────────
-
-    def _handle_fence_line(self, raw_line: str) -> bool:
-        """If *raw_line* is a fence marker or we're inside a code
-        block, handle it and return ``True``."""
-        fm = _FENCE_PAT.match(raw_line)
-
-        # ── Early Exit  ───────────────────────────────────────────
-        if not fm and not self._in_code_block:
-            return False
-
-        # ── Fence open ───────────────────────────────────────────
-        if fm and not self._in_code_block:
-            fence_marker = fm.group(1)
-            # Flush any pending table/blockquote before starting a
-            # code fence — otherwise they'd leak into the fence or
-            # be silently dropped.
-            self._flush_pending_blocks()
-            self._start_fence(fence_marker, fm.group(2))
-            self._emit_clear_line(raw_line)
-            return True
-
-        # ── Fence close ──────────────────────────────────────────
-        # if fm and self._in_code_block and self._fence is not None \
-                # and self._fence.fence_marker == fm.group(1):
-        if fm and self._fence is not None and self._fence.fence_marker == fm.group(1):
-            self._trailing_lines = 0
-            self._flush_fence()
-            self._in_code_block = False
-            self._fence = None
-            # self._trailing_lines = 0
-            return True
-
-        # ── Mismatched or stray fence inside a block ──────────────
-        # if fm and self._in_code_block and self._fence is not None:
-        #     self._fence.raw_lines.append(raw_line)
-        #     self._emit_clear_line(raw_line)
-        #     return True
-
-        # ── Inside code block  ────────────────────
-        # if self._in_code_block and self._fence is not None:
-        if self._fence is not None:
-            self._fence.raw_lines.append(raw_line)
-            self._emit_clear_line(raw_line)
-            return True
-
-        return True 
-
-    # ── Blockquote line handler ────────────────────────────────────
-
-    def _handle_blockquote_line(self, raw_line: str) -> bool:
-        """If *raw_line* is a blockquote line, accumulate it and
-        return ``True``.  Also flushes any table that may have
-        preceded the blockquote."""
-        bqm = _BQ_PAT.match(raw_line)
-        if not bqm:
-            # Not a blockquote line — flush any accumulated blockquote
-            if self._bq_lines:
-                self._flush_blockquote()
-            return False
-
-        # ── Blockquote start ─────────────────────────────────────
-        # Flush any pending table before starting a blockquote —
-        # otherwise a table immediately before a blockquote would
-        # be silently dropped.
-        if self._table_lines and self._table_has_sep:
-            self._flush_table()
-        self._table_lines = []
-        self._table_count = 0
-        self._table_has_sep = False
-
-        self._bq_lines.append(raw_line)
-        self._bq_count += screen_utils.screen_lines(raw_line, self._term_width)
-        self._emit_clear_line(raw_line)
-        self._trailing_lines = 0
-        return True
-
-    # ── Table line handler ─────────────────────────────────────────
-
-    def _handle_table_line(self, raw_line: str) -> bool:
-        """If *raw_line* looks like a pipe-separated table row,
-        accumulate it and return ``True``.  When a non-table line
-        arrives the accumulated table is flushed."""
-        if _TABLE_ROW_PAT.match(raw_line):
-            if _TABLE_SEP_PAT.match(raw_line):
-                self._table_has_sep = True
-            self._table_lines.append(raw_line)
-            self._table_count += screen_utils.screen_lines(raw_line, self._term_width)
-            self._emit_clear_line(raw_line)
-            self._trailing_lines = 0
-            return True
-
-        # Not a table row — flush a confirmed table if one was
-        # being accumulated.
-        if self._table_lines:
-            if self._table_has_sep:
-                self._flush_table()
-            # If never confirmed, raw lines are already on screen — nothing to do
-            self._table_lines = []
-            self._table_count = 0
-            self._table_has_sep = False
-
-        return False
-
-    # ── Normal line emission ───────────────────────────────────────
-
-    def _emit_normal_line(self, raw_line: str) -> None:
-        """Format and write a normal (non-block, non-fence) line."""
-        formatted = self._format_normal_line(raw_line)
-        self._write_clear(formatted)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        self._trailing_lines = 0
+        result = self._state.handle_line(raw_line, self._term_width)
+        self._apply_result(result, raw_line)
 
     # ── Trailing line re-render ────────────────────────────────────
 
@@ -427,7 +291,7 @@ class RawReplaceRenderer(Renderer):
         "markers appear then resolve" effect without ever
         duplicating text.
         """
-        if self._in_code_block:
+        if isinstance(self._state, FenceState):
             return
 
         formatted = format_inline(self._line_buf)
@@ -448,8 +312,6 @@ class RawReplaceRenderer(Renderer):
             # We're currently on the first screen line of the new text.
             # Move down to each leftover line and clear it, then move back up.
             for _ in range(diff):
-                # sys.stdout.write("\n\033[K")
-                # sys.stdout.write( screen_utils.clear_to_eol() + "\n")
                 sys.stdout.write('\n' + screen_utils.clear_to_eol())
             sys.stdout.write(screen_utils.cursor_up(diff))
 
@@ -486,141 +348,3 @@ class RawReplaceRenderer(Renderer):
             return f"{indent}{Colors.INFO}{num}{_RESET} {text}"
 
         return format_inline(raw_line)
-
-    # ── Fenced code blocks ─────────────────────────────────────────
-
-    def _start_fence(self, fence_marker: str, lang: str) -> None:
-        self._in_code_block = True
-        lang_str = f" {lang}" if lang else ""
-        w = self._term_width
-        header = f"{_DIM}┌──{lang_str} {'─' * max(2, w - 8 - len(lang_str))}{_RESET}"
-        footer = f"{_DIM}└──{'─' * max(2, w - 6)}{_RESET}"
-        self._fence = _FenceState(
-            header=header,
-            footer=footer,
-            fence_marker=fence_marker,
-            raw_lines=[],
-        )
-
-    def _flush_fence(self) -> None:
-        """Redraw the accumulated fenced code block with box borders."""
-        if self._fence is None:
-            return
-
-        # The screen currently shows: fence-marker line + N raw body lines.
-        # We'll replace them with: header + styled body lines + footer.
-        old_rows = 1 + len(self._fence.raw_lines)  # marker + body
-
-        new_lines: list[str] = [self._fence.header]
-        new_lines.extend(
-            f"{_DIM}│ {raw}{_RESET}" for raw in self._fence.raw_lines
-        )
-        new_lines.append(self._fence.footer)
-
-        sys.stdout.write(
-            screen_utils.overwrite_block(old_rows, new_lines, self._term_width)
-        )
-        sys.stdout.flush()
-
-    # ── Blockquote blocks ──────────────────────────────────────────
-
-    def _flush_blockquote(self) -> None:
-        """Redraw accumulated blockquote lines with ``│`` prefix."""
-        if not self._bq_lines or self._bq_count == 0:
-            self._bq_lines = []
-            self._bq_count = 0
-            return
-
-        new_lines: list[str] = []
-        for raw in self._bq_lines:
-            bqm = _BQ_PAT.match(raw)
-            if bqm:
-                new_lines.append(
-                    f"{_DIM}│{_RESET} {format_inline(bqm.group(2))}"
-                )
-            else:
-                new_lines.append(f"{_DIM}│{_RESET} {raw}")
-
-        sys.stdout.write(
-            screen_utils.overwrite_block(
-                self._bq_count, new_lines, self._term_width
-            )
-        )
-        sys.stdout.flush()
-        self._bq_lines = []
-        self._bq_count = 0
-
-    # ── Table blocks ───────────────────────────────────────────────
-
-    def _flush_table(self) -> None:
-        """Redraw accumulated table with aligned columns and box borders.
-
-        The raw pipe-separated rows that are currently on screen are
-        replaced with a Unicode box-drawing table where each column
-        is padded to the maximum content width.
-        """
-        if not self._table_lines or self._table_count == 0:
-            return
-
-        # Parse rows (skip separator lines, keep header + data)
-        rows: list[list[str]] = []
-        for raw in self._table_lines:
-            if _TABLE_SEP_PAT.match(raw):
-                continue
-            # "| foo | bar |" → ["foo", "bar"]
-            cells = [c.strip() for c in raw.split("|")][1:-1]
-            rows.append(cells)
-
-        if not rows:
-            return
-
-        ncols = max(len(r) for r in rows)
-
-        # Compute column widths using raw cells (before inline formatting,
-        # which only adds ANSI codes with zero visual width).
-        col_widths = [3] * ncols
-        for row in rows:
-            for i, cell in enumerate(row):
-                if i < ncols:
-                    w = len(cell)
-                    if w > col_widths[i]:
-                        col_widths[i] = w
-
-        # ── Pre-compute all redrawn lines ──────────────────────────
-
-        top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
-        mid = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
-        bot = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
-
-        redrawn_lines: list[str] = [f"{_DIM}{top}{_RESET}"]
-
-        for ri, row in enumerate(rows):
-            parts: list[str] = []
-            for ci in range(ncols):
-                cell = row[ci] if ci < len(row) else ""
-                cell_fmt = format_inline(cell)
-                cell_vw = screen_utils.visual_width(cell_fmt)
-                pad = col_widths[ci] - cell_vw
-                parts.append(f" {cell_fmt}{' ' * pad} ")
-
-            line = (
-                f"{_DIM}│{_RESET}"
-                + f"{_DIM}│{_RESET}".join(parts)
-                + f"{_DIM}│{_RESET}"
-            )
-            redrawn_lines.append(line)
-
-            # Separator after header row
-            if ri == 0:
-                redrawn_lines.append(f"{_DIM}{mid}{_RESET}")
-
-        redrawn_lines.append(f"{_DIM}{bot}{_RESET}")
-
-        # ── Cursor up, write redrawn table, clear leftovers ────────
-
-        sys.stdout.write(
-            screen_utils.overwrite_block(
-                self._table_count, redrawn_lines, self._term_width
-            )
-        )
-        sys.stdout.flush()
