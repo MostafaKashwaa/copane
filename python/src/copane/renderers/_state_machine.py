@@ -13,10 +13,14 @@ no new flush methods on the renderer.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from copane import screen_utils
 from copane.term_styles import Colors
+from copane.renderers._inline_formatting import format_inline
+if TYPE_CHECKING:
+    from copane.renderers.raw_replace_renderer import RawReplaceRenderer
 
 # ── Shared patterns ─────────────────────────────────────────────────────
 
@@ -41,15 +45,13 @@ _HEADING_COLORS: dict[int, str] = {
 
 # ── Result type ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class LineResult:
     """Returned by ``State.handle_line()``.
 
     Fields
     ------
-    consumed : bool
-        ``True`` if the line was handled by this state.  The renderer
-        should not try other states.
     body : str | None
         Text to write from column 0 followed by ``\\n``.
         The state has already decided whether it's raw or
@@ -60,17 +62,17 @@ class LineResult:
     previous_screen_rows : int
         Number of screen rows that the raw text being replaced
         occupied.  Only meaningful when ``redraw_target`` is set.
-    new_state : type[State] | None
-        If set, the renderer replaces ``self._state`` with an
-        instance of this class.  The new state will receive future
-        ``handle_line()`` calls.
+    replay_line : str | None
+        If set, the renderer will re-dispatch this line to the
+        current state (after applying any redraw).  Used by block
+        states when they end and a non-block line needs to be
+        re-processed by ``NormalState``.
     """
 
-    consumed: bool = True
     body: str | None = None
     redraw_target: list[str] | None = None
     previous_screen_rows: int = 0
-    new_state: type[State] | None = None
+    replay_line: str | None = None
 
     # ── Convenience constructors ──────────────────────────────────
 
@@ -80,25 +82,22 @@ class LineResult:
         return LineResult()
 
     @staticmethod
-    def write(text: str, to: type[State] | None = None) -> LineResult:
-        """Write *text* from column 0, optionally switching state."""
-        return LineResult(body=text, new_state=to)
+    def write(text: str) -> LineResult:
+        """Write *text* from column 0."""
+        return LineResult(body=text)
 
     @staticmethod
     def replace(lines: list[str], previous_rows: int,
-                to: type[State] | None = None) -> LineResult:
-        """Replace *previous_rows* screen rows with *lines*,
-        optionally switching state."""
+                replay: str | None = None) -> LineResult:
+        """Replace *previous_rows* screen rows with *lines*.
+
+        If *replay* is set, re-dispatch that line after redraw.
+        """
         return LineResult(
             redraw_target=lines,
             previous_screen_rows=previous_rows,
-            new_state=to,
+            replay_line=replay,
         )
-
-    @staticmethod
-    def unhandled() -> LineResult:
-        """Line does not belong to this state."""
-        return LineResult(consumed=False)
 
 
 # ── State base ──────────────────────────────────────────────────────────
@@ -113,7 +112,14 @@ class State:
 
     Persistent accumulator state (e.g. accumulated raw lines, screen
     row count) is stored as instance attributes on the subclass.
+
+    States receive a reference to the renderer context on
+    construction.  They call ``self.ctx.transition_to(StateClass)``
+    to switch states — this is the textbook State pattern.
     """
+
+    def __init__(self, ctx: RawReplaceRenderer) -> None:
+        self.ctx: RawReplaceRenderer = ctx 
 
     def handle_line(self, raw_line: str, term_width: int, /) -> LineResult:
         raise NotImplementedError
@@ -155,35 +161,32 @@ class NormalState(State):
         # ── Fence ────────────────────────────────────────────
         fm = _FENCE_PAT.match(raw_line)
         if fm:
-            return LineResult(
-                body=raw_line,
-                new_state=FenceState,
-            )
+            return self._switch_to(FenceState, raw_line, term_width)
 
         # ── Blockquote ───────────────────────────────────────
         bqm = _BQ_PAT.match(raw_line)
         if bqm:
-            return LineResult(
-                body=raw_line,
-                new_state=BlockquoteState,
-            )
+            return self._switch_to(BlockquoteState, raw_line, term_width)
 
         # ── Table ────────────────────────────────────────────
         if _TABLE_ROW_PAT.match(raw_line):
-            return LineResult(
-                body=raw_line,
-                new_state=TableState,
-            )
+            return self._switch_to(TableState, raw_line, term_width)
 
         # ── Normal line ──────────────────────────────────────
         return LineResult(body=self._format_normal(raw_line, term_width))
+
+    def _switch_to(self, new_state_cls: type[State], raw_line: str, term_width: int) -> LineResult:
+        """Transition to *new_state_cls* and calls its ``setup()`` with *raw_line*."""
+        new_state = new_state_cls(self.ctx)
+        result = new_state.on_enter(raw_line, term_width)
+        self.ctx.set_state(new_state)
+        return result
 
     # ── Formatting helpers ───────────────────────────────────
 
     @staticmethod
     def _format_normal(raw_line: str, term_width: int) -> str:
         """Return the ANSI-formatted version of a non-block line."""
-        from copane.renderers.raw_replace_renderer import format_inline
 
         if _HR_PAT.match(raw_line):
             dim = Colors.DIM
@@ -226,26 +229,28 @@ class FenceState(State):
     returns the raw line for screen output.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: RawReplaceRenderer) -> None:
+        super().__init__(ctx)
         self._marker: str = ""
         self._lang: str = ""
         self._raw_lines: list[str] = []
-        self._screen_rows: int = 1  # marker line itself counts as 1
+        self._screen_rows: int = 0
 
     def on_enter(self, raw_line: str, term_width: int, /) -> LineResult:
         fm = _FENCE_PAT.match(raw_line)
         self._marker = fm.group(1) if fm else "```"
         self._lang = fm.group(2) if fm else ""
-        return LineResult.ok()
+        self._screen_rows += 1  # for the opening fence line
+        return LineResult(body=raw_line)
 
     def handle_line(self, raw_line: str, term_width: int, /) -> LineResult:
         fm = _FENCE_PAT.match(raw_line)
         if fm and fm.group(1) == self._marker:
-            # ── Fence closed → compute redraw ──────────────
+            # ── Fence closed → compute redraw, return to NormalState ──
             redrawn = self._build_redrawn(term_width)
-            return LineResult.replace(
-                redrawn, self._screen_rows, to=NormalState
-            )
+            self.ctx.set_state(NormalState(self.ctx))
+            return LineResult.replace(redrawn, self._screen_rows)
+
         # ── Content line inside fence ─────────────────────
         self._raw_lines.append(raw_line)
         self._screen_rows += screen_utils.screen_lines(raw_line, term_width)
@@ -256,7 +261,7 @@ class FenceState(State):
         if not self._raw_lines:
             return None
         redrawn = self._build_redrawn(term_width)
-        return LineResult.replace(redrawn, self._screen_rows, to=NormalState)
+        return LineResult.replace(redrawn, self._screen_rows)
 
     def _build_redrawn(self, term_width: int) -> list[str]:
         dim = Colors.DIM
@@ -286,7 +291,8 @@ class BlockquoteState(State):
     a redraw with ``│`` prefix styling.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: RawReplaceRenderer) -> None:
+        super().__init__(ctx)
         self._raw_lines: list[str] = []
         self._screen_rows: int = 0
 
@@ -294,31 +300,25 @@ class BlockquoteState(State):
         bqm = _BQ_PAT.match(raw_line)
         if bqm:
             self._raw_lines.append(raw_line)
-            self._screen_rows += screen_utils.screen_lines(
-                raw_line, term_width)
+            self._screen_rows += screen_utils.screen_lines(raw_line, term_width)
             return LineResult(body=raw_line)
 
-        # ── Blockquote ended — redraw and delegate to NormalState ──
+        # ── Blockquote ended — redraw, replay current line to NormalState ──
         if self._raw_lines:
             redrawn = self._build_redrawn()
-            # The current non-> line is not consumed — let NormalState handle it
-            return LineResult(
-                redraw_target=redrawn,
-                previous_screen_rows=self._screen_rows,
-                new_state=NormalState,
-                consumed=False,
-            )
-        return LineResult.unhandled()
+            self.ctx.set_state(NormalState(self.ctx))
+            return LineResult.replace(redrawn, self._screen_rows,
+                                       replay=raw_line)
+        return LineResult.ok()
 
     def flush(self, term_width: int, /) -> LineResult | None:
         """Response ended with unfinished blockquote — redraw what we have."""
         if not self._raw_lines:
             return None
         redrawn = self._build_redrawn()
-        return LineResult.replace(redrawn, self._screen_rows, to=NormalState)
+        return LineResult.replace(redrawn, self._screen_rows)
 
     def _build_redrawn(self) -> list[str]:
-        from copane.renderers.raw_replace_renderer import format_inline
 
         dim = Colors.DIM
         reset = Colors.RESET
@@ -347,7 +347,8 @@ class TableState(State):
     be confirmed.  Unconfirmed tables are left as raw pipes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: RawReplaceRenderer) -> None:
+        super().__init__(ctx)
         self._raw_lines: list[str] = []
         self._screen_rows: int = 0
         self._has_sep: bool = False
@@ -357,23 +358,19 @@ class TableState(State):
             if _TABLE_SEP_PAT.match(raw_line):
                 self._has_sep = True
             self._raw_lines.append(raw_line)
-            self._screen_rows += screen_utils.screen_lines(
-                raw_line, term_width)
+            self._screen_rows += screen_utils.screen_lines(raw_line, term_width)
             return LineResult(body=raw_line)
 
-        # ── Table ended — redraw if confirmed ───────────────────
-        result = LineResult()
+        # ── Table ended ───────────────────────────────────
+        self.ctx.set_state(NormalState(self.ctx))
+
         if self._raw_lines and self._has_sep:
             redrawn = self._build_redrawn()
-            result = LineResult(
-                redraw_target=redrawn,
-                previous_screen_rows=self._screen_rows,
-                new_state=NormalState,
-                consumed=False,
-            )
+            result = LineResult.replace(redrawn, self._screen_rows,
+                                        replay=raw_line)
         else:
-            # Unconfirmed — lines are already on screen as raw text
-            result = LineResult(new_state=NormalState, consumed=False)
+            result = LineResult(replay_line=raw_line)
+
         self._raw_lines = []
         self._screen_rows = 0
         self._has_sep = False
@@ -384,10 +381,9 @@ class TableState(State):
         if not self._raw_lines or not self._has_sep:
             return None
         redrawn = self._build_redrawn()
-        return LineResult.replace(redrawn, self._screen_rows, to=NormalState)
+        return LineResult.replace(redrawn, self._screen_rows)
 
     def _build_redrawn(self) -> list[str]:
-        from copane.renderers.raw_replace_renderer import format_inline
 
         # Parse rows (skip separator lines)
         rows: list[list[str]] = []
