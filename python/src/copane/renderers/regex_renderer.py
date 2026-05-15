@@ -146,6 +146,9 @@ class RegexRenderer(Renderer):
             line, self._line_buffer = self._line_buffer.split("\n", 1)
             print(self._process_line(line), end="\n", flush=True)
 
+    def on_interrupt(self) -> None:
+        ...
+
     # ── Line processing ────────────────────────────────────────────
 
     def _process_line(self, line: str) -> str:

@@ -124,6 +124,16 @@ class RawReplaceRenderer(Renderer):
         if self._line_buf:
             self._rerender_trailing()
 
+    def on_interrupt(self) -> None:
+        # Clear the trailing line and reset state
+        self._line_buf += "\n"  # Ensure the current line is treated as complete and cleared
+        sys.stdout.flush()
+        self._line_buf = ""
+        self._last_formatted = ""
+        self._trailing_lines = 0
+        self._state = NormalState(self)
+        self._in_thinking = False
+
     # ── Cursor helpers ──────────────────────────────────────────────
 
     def _cursor_up_trailing(self) -> None:
