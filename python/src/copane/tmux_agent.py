@@ -318,7 +318,7 @@ class TmuxAgent:
                         tool_args_parsed or {},
                     )
                     # ctx.pending_tool_calls.pop(tool_call_id, None)
-                return ("tool_call", tool_name)
+                return ("tool_call", (tool_name, tool_call_id))
 
             case "tool_output":
                 # Intentionally cross-reference call_id via pending_tool_calls.
@@ -370,7 +370,7 @@ class TmuxAgent:
                     tool_name or "unknown",
                     tool_args_parsed or {},
                 )
-                return ("tool_response", event.item.output)
+                return ("tool_response", (event.item.output, tool_call_id))
         return None
 
     # ──────────────────── Post-response processing ─────────────────────────
