@@ -159,7 +159,7 @@ class NormalState(State):
 
     def handle_line(self, raw_line: str, term_width: int, /) -> LineResult:
         # ── Fence ────────────────────────────────────────────
-        fm = _FENCE_PAT.match(raw_line)
+        fm = _FENCE_PAT.match(raw_line.lstrip())
         if fm:
             return self._switch_to(FenceState, raw_line, term_width)
 
@@ -244,7 +244,7 @@ class FenceState(State):
         return LineResult(body=raw_line)
 
     def handle_line(self, raw_line: str, term_width: int, /) -> LineResult:
-        fm = _FENCE_PAT.match(raw_line)
+        fm = _FENCE_PAT.match(raw_line.lstrip())
         if fm and fm.group(1) == self._marker:
             # ── Fence closed → compute redraw, return to NormalState ──
             redrawn = self._build_redrawn(term_width)
@@ -336,6 +336,35 @@ class BlockquoteState(State):
 # Table state
 # ═══════════════════════════════════════════════════════════════════════
 
+def _word_wrap(text: str, max_width: int) -> list[str]:
+     """Word-wrap *text* (which may contain ANSI codes) so that each
+     visual line fits within *max_width* cells.
+
+     ANSI codes are preserved on the first line; subsequent lines get
+     only the ANSI reset code.
+     """
+     if max_width < 1:
+         return [text]
+
+     # Split on spaces for word-wrapping
+     words = re.split(r'(\s+)', text)
+     lines: list[str] = []
+     current: list[str] = []
+     current_vw = 0
+
+     for word in words:
+         word_vw = screen_utils.visual_width(word)
+         if current_vw + word_vw > max_width and current:
+             lines.append("".join(current).rstrip())
+             current = []
+             current_vw = 0
+         current.append(word)
+         current_vw += word_vw
+
+     if current:
+         lines.append("".join(current).rstrip())
+
+     return lines if lines else [""]
 
 class TableState(State):
     """Inside a pipe-delimited table.
@@ -365,7 +394,7 @@ class TableState(State):
         self.ctx.set_state(NormalState(self.ctx))
 
         if self._raw_lines and self._has_sep:
-            redrawn = self._build_redrawn()
+            redrawn = self._build_redrawn(term_width)
             result = LineResult.replace(redrawn, self._screen_rows,
                                         replay=raw_line)
         else:
@@ -380,11 +409,10 @@ class TableState(State):
         """Response ended with unfinished table — redraw if confirmed."""
         if not self._raw_lines or not self._has_sep:
             return None
-        redrawn = self._build_redrawn()
+        redrawn = self._build_redrawn(term_width)
         return LineResult.replace(redrawn, self._screen_rows)
 
-    def _build_redrawn(self) -> list[str]:
-
+    def _build_redrawn(self, term_width: int) -> list[str]:
         # Parse rows (skip separator lines)
         rows: list[list[str]] = []
         for raw in self._raw_lines:
@@ -392,40 +420,202 @@ class TableState(State):
                 continue
             cells = [c.strip() for c in raw.split("|")][1:-1]
             rows.append(cells)
-
+    
         if not rows:
             return []
-
+    
         ncols = max(len(r) for r in rows)
+    
+        # ── Compute initial visual widths ──
+        # Use visual_width (which strips ANSI), NOT len(),
+        # so inline formatting doesn't misalign columns.
         col_widths = [3] * ncols
         for row in rows:
             for i, cell in enumerate(row):
                 if i < ncols:
-                    col_widths[i] = max(col_widths[i], len(cell))
-
+                    col_widths[i] = max(col_widths[i], screen_utils.visual_width(cell))
+    
+        # ── Clamp total width to terminal ──
+        # Total = (ncols + 1) borders + sum(col_widths + 2 padding per col)
+        border_chars = ncols + 1
+        total_w = border_chars + sum(w + 2 for w in col_widths)
+        if total_w > self.ctx._term_width:
+            # Distribute the overflow across the widest columns first
+            overflow = total_w - term_width 
+            # Sort indices by width descending
+            sorted_idx = sorted(range(ncols), key=lambda i: col_widths[i], reverse=True)
+            for idx in sorted_idx:
+                reduction = min(col_widths[idx] - 1, overflow)  # don't go below 1
+                col_widths[idx] -= reduction
+                overflow -= reduction
+                if overflow <= 0:
+                    break
+            # Recompute total (should now fit)
+            total_w = border_chars + sum(w + 2 for w in col_widths)
+    
+        # ── Word-wrap cell content ──
+        # For each row, wrap each cell to col_width, producing
+        # a list of "sub-rows" (one list of segments per sub-row).
+        wrapped_rows: list[list[list[str]]] = []
+        max_subrows = 1
+        for row in rows:
+            sub_rows: list[list[str]] = [[] for _ in range(ncols)]
+            max_here = 1
+            for ci in range(ncols):
+                cell = row[ci] if ci < len(row) else ""
+                fmt_cell = format_inline(cell)
+                max_w = col_widths[ci]
+                lines = _word_wrap(fmt_cell, max_w)
+                sub_rows[ci] = lines
+                max_here = max(max_here, len(lines))
+            wrapped_rows.append(sub_rows)
+            max_subrows = max(max_subrows, max_here)
+    
         dim = Colors.DIM
         reset = Colors.RESET
-
+    
+        # ── Box borders ──
         top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
         mid = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
         bot = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
-
+    
         lines: list[str] = [f"{dim}{top}{reset}"]
-        for ri, row in enumerate(rows):
-            parts: list[str] = []
-            for ci in range(ncols):
-                cell = row[ci] if ci < len(row) else ""
-                cell_fmt = format_inline(cell)
-                cell_vw = screen_utils.visual_width(cell_fmt)
-                pad = col_widths[ci] - cell_vw
-                parts.append(f" {cell_fmt}{' ' * pad} ")
-            line = (
-                f"{dim}│{reset}"
-                + f"{dim}│{reset}".join(parts)
-                + f"{dim}│{reset}"
-            )
-            lines.append(line)
+        for ri, sub_cols in enumerate(wrapped_rows):
+            # Get the max sub-rows for this row
+            n_sub = max(len(sc) for sc in sub_cols)
+            for sub_i in range(n_sub):
+                parts: list[str] = []
+                for ci in range(ncols):
+                    cell_lines = sub_cols[ci]
+                    cell_text = cell_lines[sub_i] if sub_i < len(cell_lines) else ""
+                    cell_vw = screen_utils.visual_width(cell_text)
+                    pad = col_widths[ci] - cell_vw
+                    parts.append(f" {cell_text}{' ' * pad} ")
+                line = (
+                    f"{dim}│{reset}"
+                    + f"{dim}│{reset}".join(parts)
+                    + f"{dim}│{reset}"
+                )
+                lines.append(line)
             if ri == 0:
                 lines.append(f"{dim}{mid}{reset}")
         lines.append(f"{dim}{bot}{reset}")
         return lines
+
+#     def _build_redrawn(self, term_width: int) -> list[str]:
+#         # ── 1. Parse ────────────────────────────────────────────────────
+#         rows = self._parse_table_rows()
+#         if not rows:
+#             return []
+#    
+#         ncols = self._ncols(rows)
+#    
+#         # ── 2. Compute target column widths ─────────────────────────────
+#         col_widths = self._compute_col_widths(rows, ncols, term_width)
+#    
+#         # ── 3. Word-wrap every cell to fit its column width ─────────────
+#         wrapped = self._wrap_cells(rows, ncols, col_widths)
+#    
+#         # ── 4. Render the table ─────────────────────────────────────────
+#         return self._render_table(wrapped, ncols, col_widths)
+# 
+#     def _parse_table_rows(self) -> list[list[str]]:
+#         """Parse raw pipe-delimited lines into cell lists, skipping separators."""
+#         rows: list[list[str]] = []
+#         for raw in self._raw_lines:
+#             if _TABLE_SEP_PAT.match(raw):
+#                 continue
+#             cells = [c.strip() for c in raw.split("|")][1:-1]
+#             rows.append(cells)
+#         return rows
+#    
+#     @staticmethod
+#     def _ncols(rows: list[list[str]]) -> int:
+#         return max(len(r) for r in rows)
+#    
+#     def _compute_col_widths(self, rows: list[list[str]], ncols: int, term_width: int) -> list[int]:
+#         """Compute column widths that fit within `term_width`.
+#    
+#         Strategy:
+#         1. Start with natural content widths (ANSI-aware).
+#         2. If total fits, use them as-is.
+#         3. If not, distribute the deficit proportionally across columns,
+#            never going below MIN_COL_WIDTH.
+#         """
+#         MIN_COL_WIDTH = 4
+#    
+#         # Natural widths
+#         widths = [MIN_COL_WIDTH] * ncols
+#         for row in rows:
+#             for i, cell in enumerate(row):
+#                 if i < ncols:
+#                     widths[i] = max(widths[i], screen_utils.visual_width(cell))
+#    
+#         # Check if we need to shrink
+#         border_chars = ncols + 1
+#         total_w = border_chars + sum(w + 2 for w in widths)
+#         if total_w <= term_width:
+#             return widths
+#    
+#         # ── Shrink proportionally ────────────────────────────────
+#         available_data = term_width - border_chars - 2 * ncols
+#         if available_data < MIN_COL_WIDTH * ncols:
+#             # Emergency: too many columns to even show minimum — equal share
+#             per_col = max(1, available_data // ncols)
+#             return [per_col] * ncols
+#    
+#         raw_total = sum(widths)
+#         new_widths = [max(MIN_COL_WIDTH, w * available_data // raw_total) for w in widths]
+#         # Distribute rounding leftovers
+#         diff = available_data - sum(new_widths)
+#         for i in range(diff):
+#             new_widths[i % ncols] += 1
+#         return new_widths
+#    
+#     def _wrap_cells(self, rows: list[list[str]], ncols: int, col_widths: list[int]) -> list[list[list[str]]]:
+#         """Word-wrap every cell in every row to its column width.
+#    
+#         Returns a 3-level structure: rows → columns → wrapped-lines.
+#         """
+#         wrapped_rows: list[list[list[str]]] = []
+#         for row in rows:
+#             sub_cols: list[list[str]] = []
+#             for ci in range(ncols):
+#                 cell = row[ci] if ci < len(row) else ""
+#                 fmt_cell = format_inline(cell)
+#                 wrapped = _word_wrap(fmt_cell, col_widths[ci])
+#                 sub_cols.append(wrapped)
+#             wrapped_rows.append(sub_cols)
+#         return wrapped_rows
+#    
+#     def _render_table(self, wrapped: list[list[list[str]]], ncols: int, col_widths: list[int]) -> list[str]:
+#         """Build the styled table lines from wrapped cell content."""
+#         dim = Colors.DIM
+#         reset = Colors.RESET
+#    
+#         top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
+#         mid = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
+#         bot = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
+#    
+#         lines: list[str] = [f"{dim}{top}{reset}"]
+#         for ri, row in enumerate(wrapped):
+#             n_sub = max(len(cell_lines) for cell_lines in row)
+#             for sub_i in range(n_sub):
+#                 parts: list[str] = []
+#                 for ci in range(ncols):
+#                     cell_lines = row[ci]
+#                     text = cell_lines[sub_i] if sub_i < len(cell_lines) else ""
+#                     pad = col_widths[ci] - screen_utils.visual_width(text)
+#                     parts.append(f" {text}{' ' * pad} ")
+#                 line = (
+#                     f"{dim}│{reset}"
+#                     + f"{dim}│{reset}".join(parts)
+#                     + f"{dim}│{reset}"
+#                 )
+#                 lines.append(line)
+#             if ri == 0:
+#                 lines.append(f"{dim}{mid}{reset}")
+#         lines.append(f"{dim}{bot}{reset}")
+#         return lines
+ 
+

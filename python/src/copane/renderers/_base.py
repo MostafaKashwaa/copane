@@ -40,3 +40,9 @@ class Renderer(ABC):
     def on_text_chunk(self, chunk: str) -> None:
         """A chunk of the main response text (may contain markdown)."""
         ...
+
+    @abstractmethod
+    def on_interrupt(self) -> None:
+        """Called before out-of-band text (e.g. tool calls) is printed to the terminal.
+        The renderer should finalize any trailing incomplete thinking or text chunks, so that the out-of-band text appears in a clean state."""
+        ...

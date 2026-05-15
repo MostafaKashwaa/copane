@@ -90,3 +90,6 @@ class RichBufferRenderer(Renderer):
         print(chunk, end="", flush=True)
         self._buffer.append(chunk)
         self._line_count += chunk.count("\n")
+
+    def on_interrupt(self) -> None:
+        ...
