@@ -98,7 +98,7 @@ def print_banner():
     print(LOGO_DISPLAY)
 
     info_lines = {
-        "Version": get_version(),  
+        "Version": get_version(),
         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Python": sys.version.split()[0],
         "Terminal": os.getenv("TERM", "unknown"),
@@ -216,7 +216,8 @@ def _format_tool_output(res: ToolResult) -> str:
         else:
             return " ✓ "
     else:
-        error_text = res.error.splitlines()[0].strip() if res.error else res.output.splitlines()[0].strip()
+        error_text = res.error.splitlines()[0].strip(
+        ) if res.error else res.output.splitlines()[0].strip()
         return f" ✗ {error_text} "
 
 
@@ -242,6 +243,7 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
 
     try:
         renderer.on_response_begin()
+        tool_lines = {}
 
         async for kind, chunk in stream_generator:
             match kind:
@@ -254,27 +256,43 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
                     plain_text_len += len(chunk)
 
                 case 'tool_call':
-                    print(
-                        f"\n{get_colored(f'🔧 [{chunk}]', Colors.ACCENT)}",
-                        end=" ", flush=True,
-                    )
+                    tool_name, tool_id = chunk
+                    renderer.on_interrupt()
+                    # print(
+                    #     f"\n{get_colored(f'🔧 [{tool_name}]', Colors.ACCENT)}",
+                    #     end=" ", flush=True,
+                    # )
+                    tool_lines[tool_id] = f"\n{get_colored(f'🔧 [{tool_name}]',
+                                                           Colors.ACCENT)}"
+
                     # approximate: icon + brackets
                     plain_text_len += len(chunk) + 5
 
                 case 'tool_response':
-                    result = _format_tool_output(chunk)
-                    if isinstance(chunk, ToolResult):
-                        color = Colors.SUCCESS if chunk.success else Colors.ERROR
-                        plain_text_len += len(chunk.output)
+                    output, call_id = chunk
+                    result = _format_tool_output(output)
+                    renderer.on_interrupt()
+                    if isinstance(output, ToolResult):
+                        color = Colors.SUCCESS if output.success else Colors.ERROR
+                        plain_text_len += len(output.output)
                     else:
                         color = Colors.INFO
-                        plain_text_len += len(chunk)
-                    print(f"{get_colored(result.strip(), color)}",
-                          end="\n", flush=True)
+                        plain_text_len += len(output)
+                    print(
+                        f"{tool_lines.pop(call_id, '\n')}\n\t{get_colored(result.strip(), color)}",
+                        end="\n",
+                        flush=True
+                    )
+                    # print(tool_lines.pop(call_id, "\n") \
+                    # + get_colored(result.strip(), color),
+                    # end="\n", flush=True)
+                    # print(f"{get_colored(result.strip(), color)}",
+                    # end="\n", flush=True)
 
                 case 'tool_approval':
                     item, state = chunk
                     tool_name = item.tool_name or 'unknown tool'
+                    renderer.on_interrupt()
 
                     preview = format_tool_preview(item)
                     print(f"\n{get_colored(f'─' * 60, Colors.WARNING)}")
