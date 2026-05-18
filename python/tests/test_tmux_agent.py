@@ -125,6 +125,13 @@ def _build_agent(**overrides):
     """
     agent = TmuxAgent.__new__(TmuxAgent)
     agent.name = overrides.get("name", "test-agent")
+    agent._session_id = overrides.get("session_id", "test-2025-01-01_00-00-00-abc123")
+    agent._first_user_message = overrides.get("_first_user_message", "")
+    agent._title = overrides.get("_title", None)
+    agent._title_generated = overrides.get("_title_generated", False)
+    agent._save_session = MagicMock()
+    agent.save_current_session = MagicMock()
+    agent._generate_title = AsyncMock()
 
     # conversation history (with mocked methods)
     mock_history = MagicMock(spec=ConversationHistory)
