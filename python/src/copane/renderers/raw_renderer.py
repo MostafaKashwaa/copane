@@ -25,3 +25,12 @@ class RawRenderer(Renderer):
 
     def on_text_chunk(self, chunk: str) -> None:
         print(chunk, end="", flush=True)
+
+    def on_tool_call_chunk(self, chunk: str) -> None:
+        ...
+
+    def on_tool_response_chunk(self, chunk: str) -> None:
+        ...
+
+    def on_interrupt(self) -> None:
+        ...

@@ -627,7 +627,7 @@ class TestHandleRunItemToolCalled:
             "call-1", "read_file", '{"path":"/x"}'
         )
         result = agent._handle_run_item_event(event, ctx)
-        assert result == ("tool_call", "read_file")
+        assert result == ("tool_call", ("read_file", "call-1"))
         agent.history.add_tool_call.assert_called_once_with(
             "call-1", "read_file", '{"path":"/x"}'
         )
@@ -642,7 +642,7 @@ class TestHandleRunItemToolCalled:
             "call-99", "super_hallucinated_tool", '{"x":1}'
         )
         result = agent._handle_run_item_event(event, ctx)
-        assert result == ("tool_call", "super_hallucinated_tool")
+        assert result == ("tool_call", ("super_hallucinated_tool", "call-99"))
         # Should have added a synthetic error output
         agent.history.add_tool_output.assert_called_once()
         call_args = agent.history.add_tool_output.call_args
@@ -715,7 +715,7 @@ class TestHandleRunItemToolOutput:
         )
         event = _make_run_item_event_tool_output("call-1", "file content")
         result = agent._handle_run_item_event(event, ctx)
-        assert result == ("tool_response", "file content")
+        assert result == ("tool_response", ("file content", "call-1"))
         agent.history.add_tool_output.assert_called_once_with(
             "call-1",
             "file content",
@@ -791,7 +791,8 @@ class TestHandleRunItemToolOutput:
         event = _make_run_item_event_tool_output("call-1", "done")
         result = agent._handle_run_item_event(event, ctx)
         assert result[0] == "tool_response"
-        assert result[1] == "done"
+        # assert result[1] == "done"
+        assert result == ("tool_response", ("done", "call-1"))
 
 
 # -------------------------------------------------------------------
@@ -853,7 +854,7 @@ class TestProcessRunnerEvents:
         results = []
         async for r in agent._process_runner_events(mock_response, ctx):
             results.append(r)
-        assert results[0] == ("tool_call", "read_file")
+        assert results[0] == ("tool_call", ("read_file", "call-1"))
 
     @pytest.mark.asyncio
     async def test_handle_returns_none_not_yielded(self, agent):
