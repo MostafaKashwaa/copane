@@ -13,6 +13,7 @@ conversation shape is preserved.
 from dataclasses import dataclass, field
 import json
 import logging
+import os
 import sys
 import gc
 import time
@@ -33,6 +34,7 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
     ResponseTextDeltaEvent,
 )
+from openai import AsyncOpenAI
 
 from copane.tracing import traceable
 
@@ -48,6 +50,7 @@ from copane.tools import (
 from copane.model_config import ModelConfig
 from copane.model_provider import ModelProvider
 from copane.conversation_history import ConversationHistory
+from copane import session_store
 
 # logging.basicConfig(
 #     level=logging.INFO,
@@ -59,6 +62,13 @@ from copane.conversation_history import ConversationHistory
 # )
 
 MAX_TOOL_TURNS = 50  # max turns for a single tool-using response
+
+# Prompt for the title-generation call (tiny, cheap, one-shot per session).
+_TITLE_SYSTEM_PROMPT = """\
+Write a short title (5-8 words) describing this coding task. Be specific.
+Examples: "Fix N+1 query in user dashboard", "Add JWT auth to FastAPI",
+"Debug race condition in task queue", "Refactor config loader to pydantic".
+Reply with only the title, no quotes, no punctuation at the end."""
 
 
 class TmuxAgent:
@@ -86,27 +96,168 @@ class TmuxAgent:
         ]
         self.model_config = ModelConfig()
         self.model_provider = ModelProvider(self.model_config)
+        self._session_id: str = session_store.generate_session_id()
+        self._first_user_message: str = ""   # for manifest preview
+        self._title: str | None = None       # LLM-generated; None until turn 1 completes
+        self._title_generated: bool = False  # gate so we only call LLM once
 
-    # ── Full-history persistence ────────────────────────────────────
+    # ── Session persistence ─────────────────────────────────────────
+
+    @property
+    def session_id(self) -> str:
+        """Public read-only access to the current session id."""
+        return self._session_id
+
+    def _save_session(self):
+        """Overwrite the current session file with the full message list.
+
+        Called after each assistant response (crash resilience), on
+        ``/clear``, and on exit.
+        """
+        model = self.model_provider.get_model_info().get("name", "")
+        session_store.save_session(
+            self._session_id,
+            self.history.messages,
+            model=model,
+            title=self._title,
+            first_user_message=self._first_user_message,
+        )
+
+    def save_current_session(self):
+        """Public alias so app.py can trigger a save on exit/clear."""
+        self._save_session()
+
+    def _new_session_id(self):
+        """Generate a fresh session id (called on /clear)."""
+        self._session_id = session_store.generate_session_id()
+        self._first_user_message = ""
+        self._title = None
+        self._title_generated = False
+
+    def resume_session(self, session_id: str) -> bool:
+        """Save the current session, then load *session_id* into history.
+
+        Before loading, re-summarises tool outputs and truncates
+        reasoning on the raw messages so that resumed sessions don't
+        carry stale full outputs or balloon in token count.  The
+        conversation shape (user ↔ tool_call ↔ tool_output ↔ assistant)
+        is preserved — only the output *content* is compressed.
+
+        Returns False if the session file could not be loaded.
+        """
+        # Save current session first
+        self._save_session()
+
+        messages = session_store.load_session(session_id)
+        if messages is None:
+            return False
+
+        # Re-compress all tool outputs in the loaded messages using the
+        # same summarizers that run at turn boundaries.  This handles
+        # sessions that were saved mid-turn (before the summarization
+        # hook fired), where raw outputs may still be present.
+        self._summarize_all_tool_outputs(messages)
+
+        # Truncate any reasoning that accumulated across turns.
+        self._truncate_reasoning(messages)
+
+        # Load into history
+        self.history.clear()
+        for m in messages:
+            self.history.messages.append(m)
+
+        # Restore turn_id from loaded messages
+        max_turn = 0
+        for m in self.history.messages:
+            tid = m.get("_turn_id", 0)
+            if isinstance(tid, int) and tid > max_turn:
+                max_turn = tid
+        self.history._turn_id = max_turn
+
+        self.history._repair_orphaned_outputs()
+        self.history._repair_orphaned_calls()
+
+        # Switch to the resumed session identity
+        self._session_id = session_id
+
+        # Restore title and first_user_message from manifest (don't
+        # regenerate — the title already exists from the original session)
+        manifest = session_store.load_manifest()
+        for entry in manifest:
+            if entry.get("session_id") == session_id:
+                self._first_user_message = entry.get("first_user_message", "")
+                self._title = entry.get("title") or None
+                break
+        self._title_generated = self._title is not None
+
+        return True
+
+    # ── Full-history persistence (legacy) ───────────────────────────
 
     def _save_full_history(self):
         """Write the complete message list to disk before summarization.
 
         Saved to ``~/.copane/logs/session_<timestamp>.json``.
         Creates the directory if it doesn't exist.
+
+        .. note::
+
+            This is kept for the turn-boundary summarization hook but
+            is now redundant with ``_save_session()``.  We keep both
+            during the migration period so legacy log files are still
+            produced.
         """
         logs_dir = Path.home() / ".copane" / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
         path = logs_dir / f"session_{ts}.json"
         try:
-            # with open(path, "w") as f:
-            # json.dump(self.history.messages, f, indent=2, default=str)
             self.history.save_to_file(str(path))
         except (TypeError, OSError) as e:
             logging.warning("\nFailed to save full history: %s", e)
 
     # ── Turn-boundary summarization ─────────────────────────────────
+
+    @staticmethod
+    def _summarize_all_tool_outputs(messages: list[dict]):
+        """Compress every ``function_call_output`` in *messages* in-place.
+
+        Runs each output through its registered tool summarizer (same
+        as the per-turn hook).  Used on resume to compact sessions that
+        may have been saved before the turn-boundary hook fired.
+        """
+        for m in messages:
+            if m.get("type") != "function_call_output":
+                continue
+
+            tool_name = m.get("_tool_name", "")
+            summarizer = TOOL_SUMMARIZERS.get(tool_name)
+            if summarizer is None:
+                continue
+
+            args = m.get("_tool_args", {})
+            output = m.get("output", "")
+            summary = summarizer(args, output)
+            if summary is not None:
+                m["output"] = summary
+
+    @staticmethod
+    def _truncate_reasoning(messages: list[dict], max_chars: int = 400):
+        """Truncate long reasoning text in-place.
+
+        Called on resume so multi-turn sessions don't balloon from
+        accumulated thinking blocks.
+        """
+        for m in messages:
+            if m.get("type") != "reasoning":
+                continue
+            summary = m.get("summary", [])
+            if isinstance(summary, list):
+                for s in summary:
+                    if isinstance(s, dict) and isinstance(s.get("text"), str):
+                        text = s["text"]
+                        if len(text) > max_chars:
+                            s["text"] = text[:max_chars] + "..."
 
     def _summarize_previous_turn(self, messages: list[dict], prev_turn_id: int):
         """Compress tool outputs from the previous turn into metadata stubs.
@@ -116,6 +267,9 @@ class TmuxAgent:
         history to disk first, then replaces each tool-output message's
         ``output`` field in-place with its summarised stub.  Nothing is
         removed or moved — the conversation shape is preserved.
+
+        Delegates the actual summarization to
+        ``_summarize_all_tool_outputs``, filtering to the single turn.
         """
         if prev_turn_id == 0:
             return  # first turn — nothing to summarize
@@ -123,6 +277,7 @@ class TmuxAgent:
         # Save full history before modifying it
         self._save_full_history()
 
+        # Only summarize messages belonging to the previous turn
         for m in messages:
             if m.get("_turn_id") != prev_turn_id:
                 continue
@@ -147,8 +302,9 @@ class TmuxAgent:
         self.history.add_message(role, content)
 
     def clear_messages(self):
-        """Clear the conversation history."""
+        """Clear the conversation history and start a new session."""
         self.history.clear()
+        self._new_session_id()
 
     def get_message_count(self) -> int:
         """Get the number of conversation rounds."""
@@ -157,6 +313,10 @@ class TmuxAgent:
     def save_conversation(self, file_path: str):
         """Save the conversation history to a file."""
         self.history.save_to_file(file_path)
+
+    def load_conversation(self, file_path: str):
+        """Load the conversation history from a file."""
+        self.history.load_from_file(file_path)
 
     # ── Model management (delegated to ModelProvider) ───────────────
 
@@ -229,6 +389,10 @@ class TmuxAgent:
         if not self.agent:
             self.setup()
 
+        # Track first user message for the manifest preview
+        if not self._first_user_message:
+            self._first_user_message = user_input
+
         self.history.add_message("user", user_input)
 
         response = Runner.run_streamed(
@@ -245,13 +409,8 @@ class TmuxAgent:
                     yield event
             except Exception as e:
                 yield ("error", f"Error processing response stream: {e}")
-                # Remove orphaned function calls that never got a tool_output due to the Error
-                output_ids = {m["call_id"] for m in self.history.messages if m.get(
-                    "type") == "function_call_output"}
-                self.history.messages = [
-                    m for m in self.history.messages
-                    if m.get("type") != "function_call" or m.get("call_id") in output_ids
-                ]
+                # Remove orphaned function calls that never got a tool_output
+                self.history.repair_orphans()
                 break
 
             if not response.interruptions:
@@ -266,7 +425,66 @@ class TmuxAgent:
 
         self._store_reasoning(ctx.thinking_response)
         self.history.add_message("assistant", ctx.text_response)
+
+        # Generate a title from the first user+assistant exchange.
+        # This is a cheap one-shot LLM call (~10 output tokens) that
+        # only fires on turn 1.  Fail silently — the title is a nice-to-have.
+        if self.history.turn_id == 1 and not self._title_generated:
+            try:
+                self._title = await self._generate_title(
+                    self._first_user_message,
+                    ctx.text_response,
+                )
+            except Exception:
+                pass
+            finally:
+                self._title_generated = True
+
+        self._save_session()  # ← save after every complete assistant response
         self._print_memory_warning()
+
+    # ── Title generation ────────────────────────────────────────────
+
+    async def _generate_title(
+        self, user_msg: str, assistant_msg: str
+    ) -> str:
+        """Ask the current model to produce a short, specific title.
+
+        Sends a single chat-completion request with the user's first
+        message and the assistant's first response (each truncated to
+        500 chars so we don't waste tokens on long code blocks).
+        Returns a cleaned-up title string.
+        """
+        # Build client from the same model config the agent is using
+        info = self.model_provider.get_model_info()
+        model_name = info.get("name", "")
+        base_url = info.get("base_url", "")
+        env_key = info.get("env_key", "")
+        api_key = os.getenv(env_key, "") if env_key else ""
+
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+        # Truncate inputs so the call stays tiny
+        user_snippet = user_msg[:500]
+        assistant_snippet = assistant_msg[:500]
+
+        resp = await client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
+                {"role": "user", "content": (
+                    f"User asked: {user_snippet}\n\n"
+                    f"Assistant responded: {assistant_snippet}"
+                )},
+            ],
+            max_tokens=30,
+            temperature=0.3,
+        )
+
+        title = resp.choices[0].message.content or ""
+        # Strip common wrapping/quoting
+        title = title.strip().strip('"\'').rstrip(".")
+        return title
 
     # ──────────────────── Event processing ─────────────────────────────────
     async def _process_runner_events(self, response, ctx: _StreamingContext):
@@ -328,7 +546,6 @@ class TmuxAgent:
                         tool_name,
                         tool_args_parsed or {},
                     )
-                    # ctx.pending_tool_calls.pop(tool_call_id, None)
                 return ("tool_call", (tool_name, tool_call_id))
 
             case "tool_output":
@@ -420,9 +637,9 @@ class TmuxAgent:
 _agent = None
 
 
-def get_agent() -> TmuxAgent:
-    """Get the singleton instance of TmuxAgent."""
+def get_agent(name: str = "copane") -> TmuxAgent:
+    """Return the singleton TmuxAgent, creating it on first call."""
     global _agent
     if _agent is None:
-        _agent = TmuxAgent(name="tmux-agent")
+        _agent = TmuxAgent(name)
     return _agent

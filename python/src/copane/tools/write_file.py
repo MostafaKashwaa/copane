@@ -24,6 +24,9 @@ async def write_file(
 
     Supports *y* (yes), *n* (no), and *a* (always allow for the rest of
     this session).
+    NOTE: This tool dosn't support range editing, it overwrites the file if it already exists. 
+    If you want to make changes to an existing file, you have to read the file thoroughly, 
+    make the necessary changes to the content, and then write it back using this tool.
     """
     # Create parent directories if they don't exist
     parent = os.path.dirname(path)
