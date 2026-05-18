@@ -7,6 +7,7 @@ Multi-model, file-aware, terminal-first.
 import os
 import asyncio
 import sys
+import logging
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -75,6 +76,13 @@ def load_env_file(env_path: str | None = None):
     path = os.path.expanduser(path)
     load_dotenv(dotenv_path=path, override=True)
     os.environ.setdefault("COPANE_ENV_FILE", os.path.abspath(path))
+
+    # Silence noisy HTTP-transport loggers so that temporary network
+    # blips don't flood the terminal with connection errors.  This is
+    # defense-in-depth — copane.tracing already silences langsmith
+    # itself, but httpx/httpcore/openai emit their own diagnostics.
+    for noisy in ("httpx", "httpcore", "openai._base_client", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 # ── REPL constants ─────────────────────────────────────────────────────

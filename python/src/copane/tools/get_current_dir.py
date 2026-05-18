@@ -3,7 +3,7 @@
 import os
 
 from agents import function_tool
-from langsmith import traceable
+from copane.tracing import traceable
 
 from ._base import ToolResult, _strip_config_from_schema
 
