@@ -157,7 +157,7 @@ class RawReplaceRenderer(Renderer):
 
         line = get_colored(f'🔧 [{tool_name}]: ', Colors.ACCENT)
         sys.stdout.write(f"\r{line}\033[k")
-        sys.stdout.write('\n')
+        sys.stdout.write('\n\r')
         # screen_utils.write_line(line)
         # screen_utils.write_clear(line)
         # sys.stdout.write('\n')
@@ -193,7 +193,8 @@ class RawReplaceRenderer(Renderer):
 
         original_line = self._tool_call_text[call_id]
         response_rows = self._term_width - len(original_line) + 2
-        result = result.splitlines()[0]
+
+        result = result.splitlines()[0] if result else "Empty response"
         formatted_response = get_colored(result[:response_rows], color)
         final_response = f"{original_line}  {formatted_response}"
 
