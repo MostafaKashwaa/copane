@@ -8,6 +8,9 @@ import os
 import asyncio
 import sys
 import logging
+import subprocess
+import textwrap
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -51,6 +54,7 @@ from copane.term_styles import (
     COPANE_STYLE_LIGHT,
 )
 from copane.file_utils import FileCompleter, expand_files
+from copane import session_store
 
 
 COPANE_HISTORY = os.path.expanduser('~/.local/share/copane/.copane_history')
@@ -60,6 +64,14 @@ os.makedirs(os.path.dirname(COPANE_HISTORY), exist_ok=True)
 # Set once during startup, then /renderer can swap it at runtime.
 
 _current_renderer: Renderer | None = None
+
+
+# ── Path to view_conversation.py ───────────────────────────────────────
+
+def _view_conversation_script() -> Path:
+    """Return the path to view_conversation.py, relative to the copane package."""
+    import copane
+    return Path(copane.__file__).parent.parent.parent / "view_conversation.py"
 
 
 # ── Environment loading ─────────────────────────────────────────────────
@@ -122,6 +134,89 @@ def create_prompt_session() -> PromptSession:
     )
 
 
+# ── Session list display ───────────────────────────────────────────────
+
+def _print_sessions_list(agent):
+    """Print all sessions from the manifest, highlighting the current one."""
+    manifest = session_store.load_manifest()
+    if not manifest:
+        print_info("No saved sessions.\n", Colors.DIM)
+        return
+
+    print_section_header("Saved Sessions", Colors.PRIMARY)
+    current_id = agent.session_id
+
+    for entry in manifest[:20]:  # show last 20
+        sid = entry.get("session_id", "?")
+        is_current = sid == current_id
+        marker = "→ " if is_current else "  "
+
+        title = entry.get("title") or ""
+        if title:
+            title_display = f" — {title}"
+        else:
+            first = entry.get("first_user_message", "")
+            title_display = f" — {first[:60]}" if first else ""
+
+        turns = entry.get("turn_count", 0)
+        model = entry.get("model", "?").split("/")[-1]  # just the model name
+        updated = entry.get("last_updated", "")[:16]  # date part
+
+        color = Colors.SUCCESS if is_current else Colors.RESET
+        desc_color = Colors.INFO if is_current else Colors.DIM
+
+        print_tuble(
+            (f"{marker}{sid[:16]}", f"{updated}  {model}  turns:{turns}{title_display}"),
+            color, desc_color, spacing="20",
+        )
+    print()  # blank line after list
+
+
+def _print_session_view(session_id: str):
+    """Display a session using view_conversation.py --pager.
+
+    Shells out to the standalone viewer script, which renders the
+    conversation with Rich panels / markdown in an interactive pager.
+    Falls back to a plain-text warning if the script isn't found.
+    """
+    script = _view_conversation_script()
+    session_file = session_store.session_file_path(session_id)
+
+    if not script.exists():
+        print_error(
+            f"view_conversation.py not found at {script}. "
+            "Installation may be incomplete."
+        )
+        return
+
+    if not session_file.exists():
+        print_error(f"Session file not found: {session_id}")
+        return
+
+    # Show a brief header before handing off to the pager
+    manifest = session_store.load_manifest()
+    for entry in manifest:
+        if entry.get("session_id") == session_id:
+            title = entry.get("title") or entry.get("first_user_message", "")[:60]
+            model = entry.get("model", "?")
+            turns = entry.get("turn_count", 0)
+            print_section_header(f"Session: {title}", Colors.ACCENT)
+            print_tuble(("Model:", model), Colors.PRIMARY, Colors.RESET, spacing="20")
+            print_tuble(("Turns:", str(turns)), Colors.PRIMARY, Colors.RESET, spacing="20")
+            print()
+            break
+
+    try:
+        subprocess.run(
+            [sys.executable, str(script), str(session_file), "--pager"],
+            check=False,
+        )
+    except FileNotFoundError:
+        print_error("Python interpreter not found. Cannot launch viewer.")
+    except Exception as e:
+        print_error(f"Failed to launch viewer: {e}")
+
+
 # ── Special command dispatch ───────────────────────────────────────────
 
 async def handle_special_commands(user_input: str) -> bool:
@@ -133,19 +228,25 @@ async def handle_special_commands(user_input: str) -> bool:
     if not user_input.startswith("/"):
         return False
 
-    cmd = user_input[1:].strip().lower()
+    cmd = user_input[1:].strip()
 
-    if cmd == "models":
+    # Keep original case for /rename title (args may have spaces/case)
+    cmd_lower = cmd.lower()
+
+    # ── /models ─────────────────────────────────────────────────────
+    if cmd_lower == "models":
         from copane.cli import print_model_list
         print_model_list()
         return True
 
-    if cmd == "modelinfo":
+    # ── /modelinfo ──────────────────────────────────────────────────
+    if cmd_lower == "modelinfo":
         from copane.cli import print_model_info
         print_model_info()
         return True
 
-    if cmd.startswith("switch "):
+    # ── /switch <key> ───────────────────────────────────────────────
+    if cmd_lower.startswith("switch "):
         key = cmd[7:].strip()
         try:
             agent.switch_model(key)
@@ -158,14 +259,13 @@ async def handle_special_commands(user_input: str) -> bool:
             print_model_list()
         return True
 
-    if cmd.startswith("renderer"):
+    # ── /renderer [key] ─────────────────────────────────────────────
+    if cmd_lower.startswith("renderer"):
         global _current_renderer
-        # Split off the key (may be empty for /renderer with no args)
         parts = cmd.split(maxsplit=1)
         key = parts[1].strip() if len(parts) > 1 else ""
 
         if key == "":
-            # List available renderers, highlighting the current one
             current_key = get_renderer_key(_current_renderer)
             print_section_header("Available Renderers", Colors.PRIMARY)
             for rkey, rdesc in sorted(AVAILABLE_RENDERERS.items()):
@@ -184,7 +284,6 @@ async def handle_special_commands(user_input: str) -> bool:
                 print_success(f"Renderer switched to: {key} — {rdesc}")
             except (ValueError, ImportError) as e:
                 print_error(str(e))
-                # Show available renderers on error
                 print_info("Available renderers:", Colors.DIM)
                 for rkey, rdesc in sorted(AVAILABLE_RENDERERS.items()):
                     print_tuble(
@@ -193,7 +292,121 @@ async def handle_special_commands(user_input: str) -> bool:
                     )
         return True
 
-    if cmd in ("help", "?"):
+    # ── /sessions ───────────────────────────────────────────────────
+    if cmd_lower == "sessions":
+        _print_sessions_list(agent)
+        return True
+
+    # ── /view <session_id> ──────────────────────────────────────────
+    if cmd_lower.startswith("view "):
+        sid = cmd[5:].strip()
+        if not sid:
+            print_error("Usage: /view <session_id>")
+            return True
+        # Support partial-id matching: try exact first, then prefix
+        manifest = session_store.load_manifest()
+        matched = None
+        for entry in manifest:
+            eid = entry.get("session_id", "")
+            if eid == sid:
+                matched = eid
+                break
+            if eid.startswith(sid) and matched is None:
+                matched = eid
+        if matched is None:
+            print_error(f"Session '{sid}' not found. Use /sessions to list.")
+            return True
+        _print_session_view(matched)
+        return True
+
+    # ── /resume <session_id> ────────────────────────────────────────
+    if cmd_lower.startswith("resume "):
+        sid = cmd[7:].strip()
+        if not sid:
+            print_error("Usage: /resume <session_id>")
+            return True
+        # Partial-id matching
+        manifest = session_store.load_manifest()
+        matched = None
+        for entry in manifest:
+            eid = entry.get("session_id", "")
+            if eid == sid:
+                matched = eid
+                break
+            if eid.startswith(sid) and matched is None:
+                matched = eid
+        if matched is None:
+            print_error(f"Session '{sid}' not found. Use /sessions to list.")
+            return True
+        if not agent.resume_session(matched):
+            print_error(f"Failed to load session '{matched}'.")
+            return True
+        # Show what we loaded
+        title = ""
+        for entry in manifest:
+            if entry.get("session_id") == matched:
+                title = entry.get("title") or entry.get("first_user_message", "")
+                break
+        print_success(f"Resumed: {title[:80]}")
+        print_info(f"  {matched}", Colors.DIM)
+        print_info(f"  {agent.get_message_count()} turns loaded", Colors.DIM)
+        return True
+
+    # ── /delete <session_id> ────────────────────────────────────────
+    if cmd_lower.startswith("delete "):
+        sid = cmd[7:].strip()
+        if not sid:
+            print_error("Usage: /delete <session_id>")
+            return True
+        # Partial-id matching
+        manifest = session_store.load_manifest()
+        matched = None
+        for entry in manifest:
+            eid = entry.get("session_id", "")
+            if eid == sid:
+                matched = eid
+                break
+            if eid.startswith(sid) and matched is None:
+                matched = eid
+        if matched is None:
+            print_error(f"Session '{sid}' not found. Use /sessions to list.")
+            return True
+        if matched == agent.session_id:
+            print_warning("Cannot delete the active session. /clear or switch first.")
+            return True
+        session_store.remove_manifest_entry(matched)
+        print_success(f"Deleted session: {matched}")
+        return True
+
+    # ── /rename <session_id> <new_title> ────────────────────────────
+    if cmd_lower.startswith("rename "):
+        args_str = cmd[7:].strip()  # preserve case for title
+        parts = args_str.split(maxsplit=1)
+        if len(parts) < 2:
+            print_error("Usage: /rename <session_id> <new_title>")
+            return True
+        sid_part, new_title = parts
+        # Partial-id matching
+        manifest = session_store.load_manifest()
+        matched = None
+        for entry in manifest:
+            eid = entry.get("session_id", "")
+            if eid == sid_part:
+                matched = eid
+                break
+            if eid.startswith(sid_part) and matched is None:
+                matched = eid
+        if matched is None:
+            print_error(f"Session '{sid_part}' not found. Use /sessions to list.")
+            return True
+        if session_store.rename_session_title(matched, new_title):
+            print_success(f"Renamed to: {new_title}")
+        else:
+            print_error(f"Failed to rename session '{matched}'.")
+        return True
+
+    # ── /help ───────────────────────────────────────────────────────
+    if cmd_lower in ("help", "?"):
         current_key = get_renderer_key(_current_renderer)
         rdesc = AVAILABLE_RENDERERS.get(current_key, "unknown")
         print_section_header("Commands", Colors.PRIMARY)
@@ -202,7 +415,12 @@ async def handle_special_commands(user_input: str) -> bool:
             ("/switch <key>", "Switch model"),
             ("/renderer [key]", "List or switch renderers"),
             ("/modelinfo", "Current model info"),
-            ("/clear", "Clear history"),
+            ("/sessions", "List saved sessions"),
+            ("/resume <id>", "Resume a saved session"),
+            ("/view <id>", "View a session in rich pager"),
+            ("/rename <id> <title>", "Rename a session"),
+            ("/delete <id>", "Delete a session"),
+            ("/clear", "Clear history (saves first)"),
             ("/help", "This help"),
             ("exit / quit", "Quit"),
         ]:
@@ -213,7 +431,9 @@ async def handle_special_commands(user_input: str) -> bool:
         )
         return True
 
-    if cmd == "clear":
+    # ── /clear ──────────────────────────────────────────────────────
+    if cmd_lower == "clear":
+        agent.save_current_session()
         agent.clear_messages()
         print_success("History cleared")
         return True
@@ -246,6 +466,9 @@ async def async_main():
     load_env_file(args.env_file)
     print_info(f"Loaded environment from {os.environ['COPANE_ENV_FILE']}\n", Colors.DIM)
     agent = get_agent()  # Initialize agent after env is loaded
+
+    # ── Migrate old ~/.copane/logs/ → sessions (one-time, idempotent) ──
+    session_store.migrate_logs_to_sessions()
 
     # ── Renderer selection ─────────────────────────────────────────────
     _current_renderer = get_renderer()  # reads COPANE_RENDERER env var
@@ -283,6 +506,7 @@ async def async_main():
             user_input = await session.prompt_async(PROMPT_SYMBOL)
 
             if user_input.strip().lower() in EXIT_COMMANDS:
+                agent.save_current_session()
                 print(EXIT_MESSAGE)
                 break
 
@@ -304,10 +528,12 @@ async def async_main():
             try:
                 confirm = await session.prompt_async(ansi_warn("Exit? (y/N): ", ""))
                 if confirm.strip().lower() in ("y", "yes"):
+                    agent.save_current_session()
                     print_success("Goodbye!", "")
                     break
                 print_info("Continuing…\n", "")
             except KeyboardInterrupt:
+                agent.save_current_session()
                 print_success("\nGoodbye!", "")
                 break
         except Exception as e:
@@ -319,6 +545,11 @@ def main():
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:
+        # Ctrl-C at the top level (e.g. during initial --mode query)
+        try:
+            get_agent().save_current_session()
+        except Exception:
+            pass
         print(f"\n{Colors.SUCCESS}Goodbye!{Colors.RESET}")
     except Exception as e:
         print_error(f"Fatal error: {e}")

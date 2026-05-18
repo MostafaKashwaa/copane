@@ -171,6 +171,38 @@ class ConversationHistory:
         with open(file_path, "w") as f:
             json.dump(self.messages, f, indent=2, default=str)
 
+    def load_from_file(self, file_path: str) -> None:
+        """Load the message list from a JSON file, replacing current history.
+
+        Restores ``_turn_id`` from the highest ``_turn_id`` found in the
+        loaded messages, and runs orphan repair in both directions so the
+        result is safe to pass to ``for_api()``.
+        """
+        import json
+
+        with open(file_path) as f:
+            self.messages = json.load(f)
+
+        # Restore turn id from the highest _turn_id in the loaded messages
+        max_turn = 0
+        for m in self.messages:
+            tid = m.get("_turn_id", 0)
+            if isinstance(tid, int) and tid > max_turn:
+                max_turn = tid
+        self._turn_id = max_turn
+
+        self._repair_orphaned_outputs()
+        self._repair_orphaned_calls()
+
+    def repair_orphans(self) -> None:
+        """Public entry point: repair orphans in both directions.
+
+        Safe to call at any time (e.g. after a streaming error that may
+        have left a ``function_call`` without its matching output).
+        """
+        self._repair_orphaned_outputs()
+        self._repair_orphaned_calls()
+
     def estimate_memory_mb(self) -> float:
         """Rough estimate of memory used by the message list (MB)."""
         return self._estimate_total_bytes() / (1024 * 1024)
@@ -232,6 +264,38 @@ class ConversationHistory:
             logging.warning(
                 "\nOrphan repair: removed %d function_call_output(s) with no "
                 "matching function_call.",
+                removed,
+            )
+
+    def _repair_orphaned_calls(self) -> None:
+        """Remove ``function_call`` messages whose matching
+        ``function_call_output`` is missing.
+
+        This is the reverse of ``_repair_orphaned_outputs``.  It handles
+        the case where a streaming error leaves a ``function_call`` in
+        history before its corresponding ``function_call_output`` could
+        be recorded.  Such orphaned calls cause the API to reject the
+        next request because tool calls must be followed by tool messages.
+        """
+        valid_output_ids: set[str] = set()
+        for m in self.messages:
+            if m.get("type") == "function_call_output":
+                cid = m.get("call_id")
+                if cid:
+                    valid_output_ids.add(cid)
+
+        before = len(self.messages)
+        self.messages = [
+            m
+            for m in self.messages
+            if m.get("type") != "function_call"
+            or m.get("call_id") in valid_output_ids
+        ]
+        removed = before - len(self.messages)
+        if removed:
+            logging.warning(
+                "\nOrphan repair: removed %d function_call(s) with no "
+                "matching function_call_output.",
                 removed,
             )
 
