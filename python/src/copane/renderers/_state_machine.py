@@ -38,8 +38,8 @@ _HEADING_COLORS: dict[int, str] = {
     2: f"{Colors.SECONDARY}{Colors.BOLD}",
     3: f"{Colors.ACCENT}{Colors.BOLD}",
     4: f"{Colors.INFO}{Colors.BOLD}",
-    5: Colors.BOLD,
-    6: Colors.BOLD,
+    5: f"{Colors.SUCCESS}{Colors.BOLD}",
+    6: f"{Colors.WARNING}{Colors.BOLD}",
 }
 
 
@@ -265,16 +265,18 @@ class FenceState(State):
 
     def _build_redrawn(self, term_width: int) -> list[str]:
         dim = Colors.DIM
+        border_color = f"{Colors.DIM}{Colors.BG_DARK}"
         reset = Colors.RESET
-        lang_str = f" {self._lang}" if self._lang else ""
+        lang_str = f" {self._lang} " if self._lang else ""
+        lang_len = len(lang_str)
         w = term_width
 
-        header = f"{dim}┌──{lang_str} {'─' * max(2, w - 8 - len(lang_str))}{reset}"
-        footer = f"{dim}└──{'─' * max(2, w - 6)}{reset}"
+        header = f"{border_color}┌──{lang_str}{'─' * max(2, w - 4 - lang_len)}{reset}"
+        footer = f"{border_color}└──{'─' * max(2, w - 4)}{reset}"
 
         lines: list[str] = [header]
         for raw in self._raw_lines:
-            lines.append(f"{dim}│ {raw}{reset}")
+            lines.append(f"{border_color}│{reset}{dim} {raw}{reset}")
         lines.append(footer)
         return lines
 

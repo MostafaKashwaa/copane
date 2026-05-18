@@ -9,6 +9,7 @@ dependencies = [
     "openai-agents>=0.13.5",
     "prompt-toolkit>=3.0.52",
     "pynvim>=0.6.0",
+    "rich>=15.0.0",
 ]
 
 [build-system]

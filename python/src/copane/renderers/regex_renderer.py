@@ -149,6 +149,12 @@ class RegexRenderer(Renderer):
     def on_interrupt(self) -> None:
         ...
 
+    def on_tool_call_chunk(self, chunk: str) -> None:
+        ...
+
+    def on_tool_response_chunk(self, chunk: str) -> None:
+        ...
+
     # ── Line processing ────────────────────────────────────────────
 
     def _process_line(self, line: str) -> str:
