@@ -20,6 +20,7 @@ from copane.renderers._base import Renderer
 from copane.renderers.raw_renderer import RawRenderer
 from copane.renderers.regex_renderer import RegexRenderer
 from copane.renderers.raw_replace_renderer import RawReplaceRenderer
+from copane.renderers.rich_buffer_renderer import RichBufferRenderer
 
 # Optional-dependency renderers — imported lazily by get_renderer()
 # to avoid ImportError when the optional packages are missing.
@@ -29,7 +30,6 @@ __all__ = [
     "RawRenderer",
     "RegexRenderer",
     "RawReplaceRenderer",
-    "MarkdownItRenderer",
     "RichBufferRenderer",
     "get_renderer",
     "get_renderer_key",
@@ -38,9 +38,8 @@ __all__ = [
 
 AVAILABLE_RENDERERS: dict[str, str] = {
     "raw": "RawRenderer — no markdown (passthrough)",
-    "regex": "RegexRenderer — inline **bold**, *italic*, `code`",
+    "regex": "RegexRenderer — simple line by line render **bold**, *italic*, `code`",
     "raw_replace": "RawReplaceRenderer — stream raw, replace spans in-place",
-    "markdown_it": "MarkdownItRenderer — streaming tokenizer (needs markdown-it-py)",
     "rich_buffer": "RichBufferRenderer — raw-then-replace via rich (needs rich)",
 }
 
@@ -49,7 +48,6 @@ _CLASS_TO_KEY: dict[str, str] = {
     "RawRenderer": "raw",
     "RegexRenderer": "regex",
     "RawReplaceRenderer": "raw_replace",
-    "MarkdownItRenderer": "markdown_it",
     "RichBufferRenderer": "rich_buffer",
 }
 
@@ -64,7 +62,7 @@ def get_renderer(name: str | None = None) -> Renderer:
     an optional dependency is missing.
     """
     if name is None:
-        name = os.environ.get("COPANE_RENDERER", "regex").strip().lower()
+        name = os.environ.get("COPANE_RENDERER", "raw_replace").strip().lower()
 
     match name:
         case "raw":
@@ -73,9 +71,6 @@ def get_renderer(name: str | None = None) -> Renderer:
             return RegexRenderer()
         case "raw_replace":
             return RawReplaceRenderer()
-        case "markdown_it":
-            from copane.renderers.markdown_it_renderer import MarkdownItRenderer
-            return MarkdownItRenderer()
         case "rich_buffer":
             from copane.renderers.rich_buffer_renderer import RichBufferRenderer
             return RichBufferRenderer()

@@ -36,8 +36,9 @@ from copane.renderers._state_machine import (
     NormalState,
     State,
 )
-from copane.term_styles import Colors
+from copane.term_styles import Colors, get_colored
 from copane.renderers._inline_formatting import format_inline, _DIM, _RESET
+from copane.tools._base import ToolResult
 
 
 class RawReplaceRenderer(Renderer):
@@ -64,6 +65,11 @@ class RawReplaceRenderer(Renderer):
         self._trailing_lines: int = 0  # screen rows occupied by the trailing text
         self._state: State = NormalState(self)
         self._in_thinking: bool = False
+        # total screen rows emitted (including tool calls)
+        self._consumed_rows: int = 0
+        # call_id -> screen row where the tool call was emitted
+        self._tool_call_rows: dict[str, int] = {}
+        self._tool_call_text: dict[str, str] = {}
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
@@ -101,14 +107,16 @@ class RawReplaceRenderer(Renderer):
             self._in_thinking = True
         sys.stdout.write(f"{_DIM}{chunk}{_RESET}")
         sys.stdout.flush()
+        self._consumed_rows += screen_utils.screen_lines(chunk, self._term_width)
 
     def on_text_chunk(self, chunk: str) -> None:
         if not chunk:
             return
 
         if self._in_thinking:
-            sys.stdout.write('\n')
+            sys.stdout.write('\n\r')
             sys.stdout.flush()
+            self._consumed_rows += 1
             self._in_thinking = False
             self._line_buf = ""
             self._last_formatted = ""
@@ -124,8 +132,99 @@ class RawReplaceRenderer(Renderer):
         if self._line_buf:
             self._rerender_trailing()
 
+    def on_tool_call_chunk(self, chunk: str) -> None:
+        if self._in_thinking:
+            sys.stdout.write('\n\r')
+            sys.stdout.flush()
+            self._consumed_rows += 1
+            self._in_thinking = False
+            self._line_buf = ""
+            self._last_formatted = ""
+
+
+        tool_name, call_id = chunk
+        # Flush any trailing incomplete line before printing the tool call, then reset state
+        if self._line_buf:
+            self._cursor_up_trailing()
+            formatted = format_inline(self._line_buf)
+            sys.stdout.write(screen_utils.write_line(formatted))
+            sys.stdout.flush()
+            self._line_buf = ""
+            self._last_formatted = ""
+            self._consumed_rows += self._trailing_lines
+            self._trailing_lines = 0
+            self._state = NormalState(self)
+
+        line = get_colored(f'🔧 [{tool_name}]: ', Colors.ACCENT)
+        sys.stdout.write(f"\r{line}\033[k")
+        sys.stdout.write('\n')
+        # screen_utils.write_line(line)
+        # screen_utils.write_clear(line)
+        # sys.stdout.write('\n')
+        sys.stdout.flush()
+
+        # Record where this call sits in the stream so we can overwrite it with the response when it arrives
+        call_rows = screen_utils.screen_lines(line, self._term_width)
+        self._tool_call_rows[call_id] = self._consumed_rows #  + call_rows 
+        self._tool_call_text[call_id] = line
+        self._consumed_rows += call_rows
+
+    def on_tool_response_chunk(self, chunk: str) -> None:
+        response, call_id = chunk
+        call_row = self._tool_call_rows.get(call_id)
+        if not call_row:
+            # This shouldn't happen, but if it does we can just print the response inline
+            sys.stdout.write(f"\n{response}\n")
+            sys.stdout.flush()
+            self._consumed_rows += screen_utils.screen_lines(response, self._term_width)  + 1
+            self.debug_print(f"no matching tool call found for response with call id '{call_id}', printed inline")
+            return
+
+        # tool_result = _format_tool_output(response, self._term_width)
+        if isinstance(response, ToolResult):
+            color = Colors.SUCCESS if response.success else Colors.ERROR
+            if response.error:
+                result = f"Error: {response.error}"
+            else:
+                result = response.output.strip()
+        else:
+            color = Colors.INFO
+            result = response.strip()
+
+        original_line = self._tool_call_text[call_id]
+        response_rows = self._term_width - len(original_line) + 2
+        result = result.splitlines()[0]
+        formatted_response = get_colored(result[:response_rows], color)
+        final_response = f"{original_line}  {formatted_response}"
+
+        starting_row = self._consumed_rows + self._trailing_lines
+        shift = 0
+        if call_row > starting_row:
+            # If the call row is below the current cursor position, we need to move down first
+            shift = call_row - starting_row
+            sys.stdout.write(screen_utils.cursor_down(shift))
+            sys.stdout.flush()
+        else:
+            # Move cursor up to the line of the original tool call
+            shift = starting_row - call_row
+            sys.stdout.write(screen_utils.cursor_up(shift))
+            sys.stdout.flush()
+
+        sys.stdout.write(screen_utils.write_clear(final_response))
+        sys.stdout.flush()
+        # updated_response_rows = response_rows - screen_utils.screen_lines(original_line, self._term_width)
+        updated_response_rows = screen_utils.screen_lines(final_response, self._term_width) - screen_utils.screen_lines(original_line, self._term_width)
+        self._consumed_rows += updated_response_rows 
+
+        # Return cursor to the position after the trailing line
+        sys.stdout.write(screen_utils.cursor_down(shift))
+        sys.stdout.flush()
+
+        # Remove the call_id from tracking since it's now resolved
+        del self._tool_call_rows[call_id]
+
     def on_interrupt(self) -> None:
-        # Clear the trailing line and reset state
+        # Clears rerenderer state without touching the screen. the caller takes over stdout after this call
         self._line_buf += "\n"  # Ensure the current line is treated as complete and cleared
         sys.stdout.flush()
         self._line_buf = ""
@@ -133,6 +232,30 @@ class RawReplaceRenderer(Renderer):
         self._trailing_lines = 0
         self._state = NormalState(self)
         self._in_thinking = False
+
+
+    # ── Print helpers ──────────────────────────────────────────────
+    def debug_print(self, message: str) -> None:
+        line = get_colored(f"\n[DEBUG] {message}\n", Colors.DIM)
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        self._consumed_rows += screen_utils.screen_lines(line, self._term_width) + 2
+
+    # def _write(self, text: str) -> int:
+    #     """Write raw text to stdout, return number of screen rows consumed."""
+    #     rows = screen_utils.screen_lines(text, self._term_width) - 1
+    #     # if text.endswith('\n'):
+    #         # rows += 1
+    #     sys.stdout.write(text)
+    #     sys.stdout.flush()
+    #     self._consumed_rows += rows
+    #     return rows
+
+    # def _write_line(self, text: str) -> int:
+    #     """Write text followed by a newline, return number of screen rows consumed."""
+    #     rows = self._write(f"{text}\n")
+    #     # self._consumed_rows += rows
+    #     return rows 
 
     # ── Cursor helpers ──────────────────────────────────────────────
 
@@ -154,8 +277,11 @@ class RawReplaceRenderer(Renderer):
         """Write *text* from column 0, clear remainder, advance to
         the next terminal row."""
         self._write_clear(text)
-        sys.stdout.write("\n")
+        line_rows = screen_utils.screen_lines(text, self._term_width) - 1
+        sys.stdout.write('\n\r')
         sys.stdout.flush()
+        self._consumed_rows += 1 + line_rows 
+        # self._write_line(text)
         self._trailing_lines = 0
 
     # ── State transition ───────────────────────────────────────────
@@ -179,6 +305,14 @@ class RawReplaceRenderer(Renderer):
                     self._term_width,
                 )
             )
+            # Update consumed rows: the new block may be taller or shorter than the previous one, so we adjust by the difference
+            lines_length = sum([screen_utils.screen_lines(
+                line, self._term_width)
+                for line in result.redraw_target]
+            )
+
+            self._consumed_rows += lines_length - result.previous_screen_rows
+            # self._consumed_rows += screen_utils.visual_width(result.redraw_target) - result.previous_screen_rows
             sys.stdout.flush()
 
         if result.replay_line is not None:
@@ -230,10 +364,10 @@ class RawReplaceRenderer(Renderer):
             # We're currently on the first screen line of the new text.
             # Move down to each leftover line and clear it, then move back up.
             for _ in range(diff):
-                sys.stdout.write('\n' + screen_utils.clear_to_eol())
+                sys.stdout.write('\r\n' + screen_utils.clear_to_eol())
             sys.stdout.write(screen_utils.cursor_up(diff))
+            self._consumed_rows -= diff # Adjust consumed rows for the cleared lines
 
         sys.stdout.flush()
         self._trailing_lines = new_lines
         self._last_formatted = formatted
-

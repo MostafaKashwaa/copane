@@ -240,8 +240,11 @@ class TmuxAgent:
         ctx = self._StreamingContext()
 
         while True:
-            async for event in self._process_runner_events(response, ctx):
-                yield event
+            try: 
+                async for event in self._process_runner_events(response, ctx):
+                    yield event
+            except Exception as e:
+                yield ("error", f"Error processing response stream: {e}")
 
             if not response.interruptions:
                 break
