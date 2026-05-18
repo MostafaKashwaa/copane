@@ -190,13 +190,14 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     # Build the output string by capturing console prints
-    console = Console(force_terminal=True, color_system="truecolor")
+    # console = Console(force_terminal=True, color_system="auto")
+    console = Console(color_system="auto")
 
     if args.pager:
         # Capture output into a string and pipe through less -R
         import io
         buf = io.StringIO()
-        pager_console = Console(file=buf, force_terminal=True, color_system="truecolor")
+        pager_console = Console(file=buf, force_terminal=True, color_system="auto")
         render_conversation(conversation, pager_console)
         if not args.no_summary:
             show_summary(conversation, pager_console)
@@ -213,7 +214,7 @@ def _pipe_to_less(text: str, source: Path) -> None:
     """Pipe *text* through ``less -R`` for interactive scrolling."""
     try:
         proc = subprocess.Popen(
-            ["less", "-R", "-I", f"+/{source.name}"],
+            ["less", "-R", "-I" , "+/── .*  \\(turn [0-9]*\\) ──"], # f"+/{source.name}"],
             stdin=subprocess.PIPE,
         )
         proc.communicate(input=text.encode("utf-8"))

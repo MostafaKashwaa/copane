@@ -257,13 +257,13 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
 
                 case 'tool_call':
                     tool_name, tool_id = chunk
-                    renderer.on_interrupt()
+                    # renderer.on_interrupt()
                     # print(
                     #     f"\n{get_colored(f'🔧 [{tool_name}]', Colors.ACCENT)}",
                     #     end=" ", flush=True,
                     # )
-                    tool_lines[tool_id] = f"\n{get_colored(f'🔧 [{tool_name}]',
-                                                           Colors.ACCENT)}"
+                    renderer.on_tool_call_chunk(chunk)
+                    # tool_lines[tool_id] = f"\n{get_colored(f'🔧 [{tool_name}]', Colors.ACCENT)}"
 
                     # approximate: icon + brackets
                     plain_text_len += len(chunk) + 5
@@ -271,18 +271,21 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
                 case 'tool_response':
                     output, call_id = chunk
                     result = _format_tool_output(output)
-                    renderer.on_interrupt()
-                    if isinstance(output, ToolResult):
-                        color = Colors.SUCCESS if output.success else Colors.ERROR
-                        plain_text_len += len(output.output)
-                    else:
-                        color = Colors.INFO
-                        plain_text_len += len(output)
-                    print(
-                        f"{tool_lines.pop(call_id, '\n')}\n\t{get_colored(result.strip(), color)}",
-                        end="\n",
-                        flush=True
-                    )
+                    # renderer.on_interrupt()
+                    renderer.on_tool_response_chunk(chunk)
+                    
+                    # if isinstance(output, ToolResult):
+                    #     color = Colors.SUCCESS if output.success else Colors.ERROR
+                    #     plain_text_len += len(output.output)
+                    # else:
+                    #     color = Colors.INFO
+                    #     plain_text_len += len(output)
+                    # print(
+                    #     f"{tool_lines.pop(call_id, '\n')}\n\t{get_colored(result.strip(), color)}",
+                    #     end="\n",
+                    #     flush=True
+                    # )
+
                     # print(tool_lines.pop(call_id, "\n") \
                     # + get_colored(result.strip(), color),
                     # end="\n", flush=True)

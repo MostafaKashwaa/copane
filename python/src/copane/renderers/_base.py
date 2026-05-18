@@ -42,6 +42,16 @@ class Renderer(ABC):
         ...
 
     @abstractmethod
+    def on_tool_call_chunk(self, chunk: str) -> None:
+        """A chunk of text representing a tool call (e.g. ``[tool]search("query")``)."""
+        ...
+
+    @abstractmethod
+    def on_tool_response_chunk(self, chunk: str) -> None:
+        """A chunk of text representing a tool response (e.g. ``[tool_response]{"result": "value"}``)."""
+        ...
+
+    @abstractmethod
     def on_interrupt(self) -> None:
         """Called before out-of-band text (e.g. tool calls) is printed to the terminal.
         The renderer should finalize any trailing incomplete thinking or text chunks, so that the out-of-band text appears in a clean state."""
