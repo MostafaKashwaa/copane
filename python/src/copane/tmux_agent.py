@@ -34,7 +34,7 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
-from langsmith import traceable
+from copane.tracing import traceable
 
 from copane.tools import (
     get_current_dir,
@@ -240,11 +240,19 @@ class TmuxAgent:
         ctx = self._StreamingContext()
 
         while True:
-            try: 
+            try:
                 async for event in self._process_runner_events(response, ctx):
                     yield event
             except Exception as e:
                 yield ("error", f"Error processing response stream: {e}")
+                # Remove orphaned function calls that never got a tool_output due to the Error
+                output_ids = {m["call_id"] for m in self.history.messages if m.get(
+                    "type") == "function_call_output"}
+                self.history.messages = [
+                    m for m in self.history.messages
+                    if m.get("type") != "function_call" or m.get("call_id") in output_ids
+                ]
+                break
 
             if not response.interruptions:
                 break

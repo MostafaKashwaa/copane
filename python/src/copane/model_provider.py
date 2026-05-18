@@ -12,7 +12,7 @@ from typing import Any, Dict
 from agents import Agent, OpenAIChatCompletionsModel, Tool
 from openai import AsyncOpenAI
 
-from langsmith import traceable
+from copane.tracing import traceable
 
 from copane.model_config import ModelConfig
 

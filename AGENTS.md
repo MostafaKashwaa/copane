@@ -42,6 +42,7 @@ copane/                              # Git repo root (= Vim plugin root)
 │   │   ├── _version.py              # Version discovery (reads pyproject.toml)
 │   │   ├── app.py                   # Entry point: async REPL, prompt_toolkit, special commands
 │   │   ├── cli.py                   # CLI argument parsing, --mode dispatch, model display
+│   │   ├── tracing.py               # Conditional LangSmith tracing shim (pass-through or real)
 │   │   ├── tmux_agent.py            # TmuxAgent: orchestrator, streaming, tool approval, summarization
 │   │   ├── conversation_history.py  # ConversationHistory: message storage, memory safety, trimming
 │   │   ├── model_config.py          # ModelConfig: CRUD for ~/.config/tmux-agent/model_config.json
@@ -162,6 +163,8 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  │  • read_file, run_command, grep_files  │   │
                     │  │  • list_files, get_current_dir         │   │
                     │  │  • write_file (needs_approval=True)    │   │
+                    │  │  • Each tool is decorated with         │   │
+                    │  │    @traceable via copane.tracing shim  │   │
                     │  │  • Blocked commands (danger heuristics)│   │
                     │  │  • Each tool exports summarize() for   │   │
                     │  │    turn-boundary compression           │   │
@@ -187,7 +190,7 @@ copane/                              # Git repo root (= Vim plugin root)
 2. On `VimEnter`, `s:setup()` runs (deferred 100ms) → checks prerequisites, sets up venv path
 3. User runs `:CopaneOpen` → calls `tmux_agent#open()`
 4. `tmux_agent#open()` checks/creates venv via `setup_python.sh`, then creates a tmux split-pane running `python3 -m copane.app --env-file ~/.copane.env`
-5. `app.py` loads env file → creates `TmuxAgent` singleton → selects renderer via `get_renderer()` → prints banner → enters REPL loop
+5. `app.py` loads env file → silences noisy HTTP loggers (httpx, httpcore, openai._base_client, urllib3) → creates `TmuxAgent` singleton → selects renderer via `get_renderer()` → prints banner → enters REPL loop
 
 ## Key files — what to touch for common tasks
 
@@ -195,10 +198,11 @@ copane/                              # Git repo root (= Vim plugin root)
 |------|---------------------------|
 | `python/src/copane/tmux_agent.py` | Change streaming, tool approval flow, agent setup, system prompt, summarization dispatch |
 | `python/src/copane/conversation_history.py` | Change message storage, memory limits, trimming logic, byte budget, reasoning truncation |
+| `python/src/copane/tracing.py` | Change how `@traceable` is resolved (conditional import vs pass-through), LangSmith logger silencing |
 | `python/src/copane/tools/` | Add/modify tools, change truncation limits, add danger patterns |
 | `python/src/copane/tools/_base.py` | Change `ToolResult` model, shared truncation, danger heuristics |
 | `python/src/copane/tools/__init__.py` | Register a new tool (imports + `TOOL_SUMMARIZERS` dict) |
-| `python/src/copane/app.py` | Change REPL behavior, add slash commands, modify startup, renderer selection |
+| `python/src/copane/app.py` | Change REPL behavior, add slash commands, modify startup, renderer selection, HTTP logger suppression |
 | `python/src/copane/cli.py` | Change CLI args, `--mode` dispatch, model info display |
 | `python/src/copane/ui.py` | Change streaming display, banner, approval prompt UI, renderer dispatch |
 | `python/src/copane/renderers/` | Add/modify renderers: streaming output formatting for thinking + text chunks |
@@ -212,6 +216,46 @@ copane/                              # Git repo root (= Vim plugin root)
 | `python/src/copane/term_styles.py` | Change colors, logos, prompt_toolkit styles, print helpers |
 | `autoload/tmux_agent.vim` | Change tmux pane lifecycle, Python venv setup |
 | `plugin/copane.vim` | Change Vim commands, mappings, autocmds |
+
+## How LangSmith tracing works
+
+The `tracing.py` module is the **single source of truth** for the `@traceable`
+decorator. Every other module imports it from here:
+
+```python
+from copane.tracing import traceable
+```
+
+At import time, `tracing.py` checks two env vars:
+
+- `LANGSMITH_TRACING` must be set to `"true"`
+- `LANGSMITH_API_KEY` must be non-empty
+
+If **both** conditions are met, the real `langsmith.traceable` is imported and
+used.  If not, a **pass-through decorator** is used instead — a plain identity
+wrapper that supports all calling conventions (`@traceable`, `@traceable()`,
+`@traceable(name="…")`) for both sync and async functions, but does nothing.
+
+The pass-through also means `langsmith` is **never imported** when tracing is
+off — zero import overhead, zero log noise, zero network attempts.
+
+### Logger silencing
+
+`tracing.py` silences the `langsmith.client` (CRITICAL) and `langsmith`
+(WARNING) loggers at import time, so even when tracing *is* enabled, transient
+network errors don't flood the terminal.
+
+`app.py` provides defense-in-depth by also silencing `httpx`, `httpcore`,
+`openai._base_client`, and `urllib3` to WARNING level.
+
+### Why this matters for tool schemas
+
+The **real** `langsmith.traceable` injects a `config` keyword parameter into
+every wrapped function.  `@function_tool` picks that up in its JSON schema,
+and `_strip_config_from_schema()` removes it.  The **pass-through** decorator
+does **not** inject `config`, so `_strip_config_from_schema()` becomes a
+harmless no-op — but it is still called unconditionally on every tool, so the
+code path is identical whether tracing is enabled or not.
 
 ## How renderers work
 
@@ -303,18 +347,26 @@ Adding a new tool:
 2. Import both in `tools/__init__.py`, add to `TOOL_SUMMARIZERS` dict
 3. Add `tool` to the `self.tools` list in `TmuxAgent.__init__()` (`tmux_agent.py`)
 4. Call `_strip_config_from_schema(my_tool.params_json_schema)` at module level in the tool file
+5. Import `traceable` from `copane.tracing`, **not** from `langsmith` directly
 
 ### Decorator order matters
 
 ```python
+from copane.tracing import traceable
+
 @function_tool          # ← bottom (builds JSON schema from the function signature)
-@traceable(run_type="tool")  # ← top (wraps function, injects `config` param)
+@traceable(run_type="tool")  # ← top (wraps function; with real langsmith, injects `config` param)
 def my_tool(...) -> ToolResult:
 ```
 
-`@traceable` adds a `config` keyword parameter. `@function_tool` then picks up
-that extra param in its schema. `_strip_config_from_schema()` removes it so
-OpenAI's API doesn't reject the schema (it requires every property to have a `type`).
+When LangSmith tracing is **enabled**, the real `@traceable` adds a `config`
+keyword parameter. `@function_tool` then picks up that extra param in its
+schema. `_strip_config_from_schema()` removes it so OpenAI's API doesn't
+reject the schema (it requires every property to have a `type`).
+
+When tracing is **disabled**, the pass-through decorator does **not** inject
+`config`, so `_strip_config_from_schema()` is a harmless no-op. The decorator
+order stays the same regardless — the code path is identical.
 
 ### ToolResult
 
@@ -428,7 +480,7 @@ Declared in `python/pyproject.toml`:
 | Package | Purpose |
 |---------|---------|
 | `openai-agents` | Agent SDK (`Agent`, `Runner`, `function_tool`, `ToolApprovalItem`) |
-| `langsmith` | Tracing (`@traceable` decorator) |
+| `langsmith` | Tracing (`@traceable` decorator); **conditionally imported** via `copane.tracing` — only loaded if `LANGSMITH_TRACING=true` |
 | `prompt-toolkit` | Interactive REPL with completion and history |
 | `pynvim` | Neovim remote plugin support (for `rplugin/`, currently broken) |
 | `autopep8` | Declared but **never imported** — dead dependency |
@@ -473,7 +525,6 @@ NOTE: The `test_tool_run_command.py` contains a test for timeout behavior. It ru
 | `/models` | List available models |
 | `/switch <key>` | Switch model |
 | `/modelinfo` | Show current model info |
-| `/clear` | Clear conversation history |
 | `/help` | Show help |
 
 Tab completion is available for slash commands and model keys.
@@ -505,6 +556,7 @@ Filetype-specific (Python, JavaScript/TypeScript):
 ## What NOT to change without careful thought
 
 - **`ToolResult` schema** — the system prompt tells the LLM about it
+- **`tracing.py`** — the single source of truth for `@traceable`; every tool and agent file imports from it. Changing the pass-through / real traceable split, or removing the pre-emptive logger silencing, could cause import errors or log noise.
 - **`Renderer` ABC** — the four-method contract is the interface between `ui.py` and all renderers
 - **`MAX_TOOL_TURNS=50`** in `tmux_agent.py` — hard cap on tool calls per round
 - **The summarizer contract** `summarize(args, output) -> str | None` — every tool exports it
@@ -525,7 +577,7 @@ Filetype-specific (Python, JavaScript/TypeScript):
 
 4. **Missing explicit dependencies:** `pydantic`, `python-dotenv`, and `httpx` are used directly but only available as transitive deps of `openai-agents`.
 
-5. **System prompt typos:** "wheather" → "whether" and "ouput" → "output" in `model_provider.py`.
+5. **System prompt typos:** "wheather" → "whether" and "ouput" → "output" in the system prompt in `model_provider.py` (line 192).
 
 6. **Stale backup files:** `*.bak`, `*.swp` files in `src/copane/`.
 
@@ -540,3 +592,7 @@ Filetype-specific (Python, JavaScript/TypeScript):
 11. **`RichBufferRenderer` ANSI escape codes** — the cursor-up/clear sequence (`\\033[{N}F\\033[J`) assumes the raw output is still visible on screen; if the terminal scrolls, the replacement may misalign.
 
 12. **`MarkdownItRenderer` stability boundary** — uses `\\n\\n` as the paragraph break heuristic; inline-only markdown (bold/italic/code without paragraph breaks) may not render until the response completes and `on_response_complete()` flushes the buffer.
+
+13. **No tests for `tracing.py`** — the pass-through decorator and conditional import logic have been verified manually but have no automated test coverage yet.
+
+14. **`/clear` command missing from help output** — `handle_special_commands` recognizes `/clear` but it's not listed in the `/help` response (the `app.py` help handler was inadvertently truncated during refactoring).

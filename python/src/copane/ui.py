@@ -217,7 +217,7 @@ def _format_tool_output(res: ToolResult) -> str:
             return " ✓ "
     else:
         error_text = res.error.splitlines()[0].strip(
-        ) if res.error else res.output.splitlines()[0].strip()
+        ) if res.error else res.output.splitlines()[0].strip() if res.output else "Empty output" 
         return f" ✗ {error_text} "
 
 
