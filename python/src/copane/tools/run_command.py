@@ -7,7 +7,7 @@ import subprocess
 from typing import Annotated
 
 from agents import function_tool
-from langsmith import traceable
+from copane.tracing import traceable
 from pydantic import Field
 
 from ._base import (
