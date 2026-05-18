@@ -50,15 +50,22 @@ copane/                              # Git repo root (= Vim plugin root)
 │   │   ├── ui.py                    # Streaming display, banner, approval prompts
 │   │   ├── preview.py               # Diff preview formatting for tool approval
 │   │   ├── file_utils.py            # @filename completion (FileCompleter) and expansion
-│   │   ├── completers.py            # Multi-mode completer (files, slash commands, model keys)
+│   │   ├── completers.py            # Multi-mode completer (files, slash commands, model/renderer keys, session IDs)
+│   │   ├── screen_utils.py          # Terminal cursor positioning and screen measurement primitives
+│   │   ├── session_store.py         # Session file persistence — save, load, manifest, migration
+│   │   ├── view_conversation.py     # Standalone terminal viewer for conversation JSON files (rich pager)
 │   │   ├── term_styles.py           # ANSI colors, logos, prompt_toolkit styles, print helpers
 │   │   ├── renderers/               # Pluggable streaming response renderers
 │   │   │   ├── __init__.py          # get_renderer() factory, AVAILABLE_RENDERERS registry
 │   │   │   ├── _base.py             # Renderer ABC — lifecycle + chunk handlers
-│   │   │   ├── raw_renderer.py      # RawRenderer — passthrough (default)
+│   │   │   ├── raw_renderer.py      # RawRenderer — passthrough
 │   │   │   ├── regex_renderer.py    # RegexRenderer — inline **bold**, *italic*, `code`
-│   │   │   ├── markdown_it_renderer.py  # MarkdownItRenderer — streaming markdown-it-py
-│   │   │   └── rich_buffer_renderer.py  # RichBufferRenderer — raw-then-replace with rich
+│   │   │   ├── raw_replace_renderer.py  # RawReplaceRenderer — stream raw, replace spans in-place
+│   │   │   ├── rich_buffer_renderer.py  # RichBufferRenderer — raw-then-replace with rich
+│   │   │   ├── markdown_it_renderer.py  # MarkdownItRenderer — streaming markdown-it-py (NOT REGISTERED — dead code)
+│   │   │   ├── _state_machine.py    # Internal helper for RegexRenderer (paragraph state machine)
+│   │   │   ├── _inline_formatting.py# Internal helper for RegexRenderer (inline markdown → ANSI)
+│   │   │   └── md_regex.py          # DEAD CODE — empty file
 │   │   ├── tools/                   # Tool implementations
 │   │   │   ├── __init__.py          # Re-exports all tools + TOOL_SUMMARIZERS registry
 │   │   │   ├── _base.py             # Shared: ToolResult, truncation, danger heuristics, schema helpers
@@ -86,7 +93,9 @@ copane/                              # Git repo root (= Vim plugin root)
 │       ├── test_tmux_agent.py
 │       ├── test_model_provider.py
 │       ├── test_model_config.py
-│       └── test_conversation_history.py
+│       ├── test_conversation_history.py
+│       ├── test_screen_utils.py
+│       └── test_screen_utils_composed.py
 │
 ├── rplugin/python3/tmux_agent.py    # DEAD CODE — legacy Neovim RPC plugin, broken imports
 ├── install.sh                       # Standalone terminal installer (clones repo, creates venv)
@@ -129,8 +138,13 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  │    - @filename → FileCompleter       │     │
                     │  │    - /command → CommandCompleter      │     │
                     │  │    - /switch <key> → ModelKeyCompleter│     │
+                    │  │    - /renderer <key> → RendererKey   │     │
+                    │  │    - /resume|view|delete|rename <id> │     │
+                    │  │      → SessionIdCompleter             │     │
                     │  │  • Multiline input (Ctrl+J to submit) │     │
-                    │  │  • Special commands (/switch, /clear) │     │
+                    │  │  • Special commands (/switch, /clear, │     │
+                    │  │    /renderer, /sessions, /resume,     │     │
+                    │  │    /view, /delete, /rename)            │     │
                     │  └──────────────┬───────────────────────┘     │
                     │                 │ user_input                  │
                     │  ┌──────────────▼───────────────────────┐     │
@@ -140,6 +154,8 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  │  • Reasoning truncation              │     │
                     │  │  • Turn-boundary summarization       │     │
                     │  │  • Message trimming (safety net)     │     │
+                    │  │  • Session persistence (_save_session│     │
+                    │  │    after every assistant response)    │     │
                     │  └──────────────┬───────────────────────┘     │
                     │                 │ (kind, chunk) tuples        │
                     │  ┌──────────────▼───────────────────────┐     │
@@ -151,11 +167,14 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  └──────────────┬───────────────────────┘     │
                     │                 │                             │
                     │  ┌──────────────▼─────────────────────────┐   │
-                    │  │ renderers/ package (4 renderers)       │   │
-                    │  │  • RawRenderer — passthrough (default) │   │
+                    │  │ renderers/ package (5 renderers)       │   │
+                    │  │  • RawRenderer — passthrough           │   │
                     │  │  • RegexRenderer — inline ANSI markup  │   │
-                    │  │  • MarkdownItRenderer — streaming parse│   │
+                    │  │  • RawReplaceRenderer — raw-then-      │   │
+                    │  │    replace-in-place (default)          │   │
                     │  │  • RichBufferRenderer — raw then rich  │   │
+                    │  │  • MarkdownItRenderer — (not registered│   │
+                    │  │    in get_renderer(); dead code)       │   │
                     │  └────────────────────────────────────────┘   │
                     │                 │ tool calls                  │
                     │  ┌──────────────▼─────────────────────────┐   │
@@ -168,6 +187,15 @@ copane/                              # Git repo root (= Vim plugin root)
                     │  │  • Blocked commands (danger heuristics)│   │
                     │  │  • Each tool exports summarize() for   │   │
                     │  │    turn-boundary compression           │   │
+                    │  └────────────────────────────────────────┘   │
+                    │                                               │
+                    │  ┌────────────────────────────────────────┐   │
+                    │  │ Session persistence                    │   │
+                    │  │  • session_store.py: save/load/manifest│   │
+                    │  │  • ~/.copane/sessions/<id>.json        │   │
+                    │  │  • ~/.copane/sessions/manifest.json    │   │
+                    │  │  • Saved after every assistant response│   │
+                    │  │  • /resume, /view, /delete, /rename    │   │
                     │  └────────────────────────────────────────┘   │
                     └───────────────────────────────────────────────┘
 ```
@@ -182,7 +210,8 @@ copane/                              # Git repo root (= Vim plugin root)
 6. Tool calls, tool responses, and approval prompts are handled directly by `ui.py` (they do not vary between renderers)
 7. For tool approval, `ui.py` shows a preview (diff for write_file, command for run_command) via `preview.py`
 8. After the response completes, the assistant message is stored in `ConversationHistory`
-9. On the *next* user message, `_summarize_previous_turn()` compresses tool outputs in-place
+9. **`TmuxAgent._save_session()` persists the full conversation to `~/.copane/sessions/<id>.json` and updates `manifest.json`** — this happens after every assistant response for crash resilience
+10. On the *next* user message, `_summarize_previous_turn()` compresses tool outputs in-place
 
 ### Startup flow
 
@@ -190,29 +219,32 @@ copane/                              # Git repo root (= Vim plugin root)
 2. On `VimEnter`, `s:setup()` runs (deferred 100ms) → checks prerequisites, sets up venv path
 3. User runs `:CopaneOpen` → calls `tmux_agent#open()`
 4. `tmux_agent#open()` checks/creates venv via `setup_python.sh`, then creates a tmux split-pane running `python3 -m copane.app --env-file ~/.copane.env`
-5. `app.py` loads env file → silences noisy HTTP loggers (httpx, httpcore, openai._base_client, urllib3) → creates `TmuxAgent` singleton → selects renderer via `get_renderer()` → prints banner → enters REPL loop
+5. `app.py` loads env file → silences noisy HTTP loggers (httpx, httpcore, openai._base_client, urllib3) → creates `TmuxAgent` singleton → runs migration (`migrate_logs_to_sessions()`) from legacy `~/.copane/logs/` to `~/.copane/sessions/` → selects renderer via `get_renderer()` (default: `raw_replace`) → prints banner → enters REPL loop
 
 ## Key files — what to touch for common tasks
 
 | File | Touch when you need to... |
 |------|---------------------------|
-| `python/src/copane/tmux_agent.py` | Change streaming, tool approval flow, agent setup, system prompt, summarization dispatch |
-| `python/src/copane/conversation_history.py` | Change message storage, memory limits, trimming logic, byte budget, reasoning truncation |
+| `python/src/copane/tmux_agent.py` | Change streaming, tool approval flow, agent setup, system prompt, summarization dispatch, session persistence |
+| `python/src/copane/conversation_history.py` | Change message storage, memory limits, trimming logic, byte budget, reasoning truncation, save_to_file/load_from_file |
 | `python/src/copane/tracing.py` | Change how `@traceable` is resolved (conditional import vs pass-through), LangSmith logger silencing |
 | `python/src/copane/tools/` | Add/modify tools, change truncation limits, add danger patterns |
 | `python/src/copane/tools/_base.py` | Change `ToolResult` model, shared truncation, danger heuristics |
 | `python/src/copane/tools/__init__.py` | Register a new tool (imports + `TOOL_SUMMARIZERS` dict) |
-| `python/src/copane/app.py` | Change REPL behavior, add slash commands, modify startup, renderer selection, HTTP logger suppression |
+| `python/src/copane/app.py` | Change REPL behavior, add slash commands, modify startup, renderer selection, HTTP logger suppression, session migration |
 | `python/src/copane/cli.py` | Change CLI args, `--mode` dispatch, model info display |
 | `python/src/copane/ui.py` | Change streaming display, banner, approval prompt UI, renderer dispatch |
 | `python/src/copane/renderers/` | Add/modify renderers: streaming output formatting for thinking + text chunks |
 | `python/src/copane/renderers/_base.py` | Change `Renderer` ABC — lifecycle and chunk-handler contract |
 | `python/src/copane/renderers/__init__.py` | Register a new renderer (add to `get_renderer()` + `AVAILABLE_RENDERERS`) |
-| `python/src/copane/completers.py` | Change Tab-completion: file paths, slash commands, model keys |
+| `python/src/copane/completers.py` | Change Tab-completion: file paths, slash commands, model keys, renderer keys, session IDs |
 | `python/src/copane/preview.py` | Change diff/preview formatting for tool approval |
 | `python/src/copane/model_config.py` | Change model config CRUD, default models |
 | `python/src/copane/model_provider.py` | Change model status checks, Agent construction, system prompt |
 | `python/src/copane/file_utils.py` | Change @filename completion or expansion |
+| `python/src/copane/screen_utils.py` | Change cursor positioning, screen measurement, ANSI escape primitives used by renderers |
+| `python/src/copane/session_store.py` | Change session file format, manifest schema, save/load logic, old-log migration |
+| `python/src/copane/view_conversation.py` | Change how `/view` renders conversations in the standalone rich pager |
 | `python/src/copane/term_styles.py` | Change colors, logos, prompt_toolkit styles, print helpers |
 | `autoload/tmux_agent.vim` | Change tmux pane lifecycle, Python venv setup |
 | `plugin/copane.vim` | Change Vim commands, mappings, autocmds |
@@ -287,10 +319,15 @@ Tool calls, tool responses, and tool approval are handled directly in
 
 | Name | Class | Description | Dependencies |
 |------|-------|-------------|--------------|
-| `raw` | `RawRenderer` | Passthrough — prints chunks as-is (default, pre-renderer behaviour) | None |
+| `raw` | `RawRenderer` | Passthrough — prints chunks as-is | None |
 | `regex` | `RegexRenderer` | Converts `**bold**`, `*italic*`, `` `code` ``, and `### headings` to ANSI on-the-fly | None |
-| `markdown_it` | `MarkdownItRenderer` | Streaming CommonMark parser; buffers chunks, renders stable blocks to ANSI | `markdown-it-py` |
+| `raw_replace` | `RawReplaceRenderer` | Streams raw text, then replaces markdown spans in-place using ANSI cursor-up/hide/show sequences; uses `screen_utils.py` for cursor measurement | None |
 | `rich_buffer` | `RichBufferRenderer` | Prints raw during streaming, clears and replaces with `rich.Markdown` on completion | `rich` |
+
+**Note:** `MarkdownItRenderer` (in `markdown_it_renderer.py`) exists as a file
+but is **not registered** in `get_renderer()` or `AVAILABLE_RENDERERS`. It is
+dead code — do not add it to the registry without first stabilizing its
+streaming paragraph-boundary heuristic.
 
 ### Renderer selection
 
@@ -300,7 +337,7 @@ Controlled by the `COPANE_RENDERER` environment variable. Set it in `~/.copane.e
 COPANE_RENDERER=regex
 ```
 
-Or at runtime in any shell before starting copane. Default is `"raw"`.
+Or switch at runtime with the `/renderer` command. Default is `"raw_replace"`.
 
 The factory function `get_renderer(name=None)` in `renderers/__init__.py` reads
 the env var and returns the appropriate `Renderer` instance. Unknown names
@@ -327,11 +364,19 @@ the REPL. It inspects the input context and delegates:
 | `@partial_path` | `FileCompleter` (from `file_utils.py`) | `@src/main` → `@src/main.py` |
 | `/partial_cmd` (no space) | `CommandCompleter` | `/sw` → `/switch` |
 | `/switch partial_key` | `ModelKeyCompleter` | `/switch dee` → `deepseek-chat` |
+| `/renderer partial_key` | `RendererKeyCompleter` | `/renderer raw` → `raw_replace` |
+| `/resume\|/view\|/delete\|/rename partial_id` | `SessionIdCompleter` | `/resume 2026` → session ID with metadata |
 
-`CommandCompleter` offers: `/switch`, `/clear`, `/models`, `/modelinfo`, `/help`.
+`CommandCompleter` offers: `/switch`, `/renderer`, `/clear`, `/models`, `/modelinfo`,
+`/help`, `/sessions`, `/resume`, `/view`, `/delete`, `/rename`.
 
 `ModelKeyCompleter` reads available keys from `ModelConfig` on each activation
 (so it stays in sync if the user edits the config file).
+
+`RendererKeyCompleter` reads from `AVAILABLE_RENDERERS` at completion time.
+
+`SessionIdCompleter` reads from `session_store.load_manifest()` and shows
+session metadata (model, turn count, title) alongside each ID for disambiguation.
 
 ## How tools work
 
@@ -447,11 +492,28 @@ The model must re-read files each turn to get current content.
 | Reasoning truncation | 8,000 chars per reasoning block | `MAX_REASONING_CHARS` |
 | read_file safety | 50,000 chars per read | `_MAX_READ_FILE_SAFETY_LIMIT` |
 
-### Full history persistence
+### Session persistence (primary)
 
-Before each summarization, the complete message list is saved to
-`~/.copane/logs/session_<timestamp>.json`. This is done by
-`TmuxAgent._save_full_history()`.
+After every assistant response, `TmuxAgent._save_session()` persists the
+full conversation to `~/.copane/sessions/<id>.json` and updates
+`~/.copane/sessions/manifest.json`. This provides crash resilience — the
+last saved state is at most one response behind.
+
+The `/sessions`, `/resume`, `/view`, `/delete`, and `/rename` commands
+operate on these session files. `TmuxAgent.resume_session()` loads a
+previous session, re-summarizes its content, truncates reasoning blocks,
+and restores the turn counter so the conversation continues seamlessly.
+
+Sessions are also saved on `/clear` and on normal exit (Ctrl+D).
+
+### Legacy full-history persistence
+
+Before each summarization, the complete message list is ALSO saved to
+`~/.copane/logs/session_<timestamp>.json` via `TmuxAgent._save_full_history()`.
+This is a legacy mechanism kept for compatibility during the migration
+period. `app.py` runs `migrate_logs_to_sessions()` at startup to import
+old log files into the session store (old files are left in place; a
+sentinel file prevents duplicate imports).
 
 ### Orphan repair
 
@@ -467,7 +529,9 @@ the same `call_id`.
 | Environment | `~/.copane.env` | API keys (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, etc.) + `COPANE_RENDERER` |
 | Model config | `~/.config/tmux-agent/model_config.json` | Selected model, available models, endpoints |
 | History | `~/.local/share/copane/.copane_history` | prompt_toolkit REPL history |
-| Session logs | `~/.copane/logs/session_*.json` | Full message history dumps |
+| Session files | `~/.copane/sessions/<id>.json` | Per-session message history + metadata |
+| Session manifest | `~/.copane/sessions/manifest.json` | Index of all saved sessions (id, title, model, turn count, timestamps) |
+| Session logs (legacy) | `~/.copane/logs/session_*.json` | Full message history dumps from the legacy persistence path |
 
 The model config is auto-generated on first run with defaults for DeepSeek,
 OpenAI, and local Ollama. Users can add any OpenAI-compatible endpoint
@@ -490,7 +554,7 @@ Optional dependencies (`[renderers]` extras):
 | Package | Purpose |
 |---------|---------|
 | `rich` | Rich terminal rendering (`RichBufferRenderer`) |
-| `markdown-it-py` | Streaming CommonMark parser (`MarkdownItRenderer`) |
+| `markdown-it-py` | Declared for `MarkdownItRenderer` but that renderer is **not registered** in `get_renderer()` — effectively a dead optional dependency |
 
 Used as transitive dependencies (should be declared explicitly):
 - `pydantic` — `ToolResult` model
@@ -513,7 +577,8 @@ cd python
 CI runs `pytest -q --tb=short` in the `python/` directory on Python 3.12.
 
 The test suite uses one test file per tool, plus tests for the agent,
-model provider, model config, conversation history, and tool schema/fixtures.
+model provider, model config, conversation history, screen utilities, and
+tool schema/fixtures.
 `conftest.py` provides `tmp_dir`, `sample_file` fixtures and `invoke()` helper.
 
 NOTE: The `test_tool_run_command.py` contains a test for timeout behavior. It runs a command that sleeps for 60 seconds and expects it to be killed after 30 seconds. If you tried to run this test it would timeout and fail. If it fails in the scope you're testing and you need to verify it's working, ask the user to run it manually.
@@ -524,10 +589,17 @@ NOTE: The `test_tool_run_command.py` contains a test for timeout behavior. It ru
 |---------|--------|
 | `/models` | List available models |
 | `/switch <key>` | Switch model |
+| `/renderer [key]` | List available renderers, or switch to `<key>` |
 | `/modelinfo` | Show current model info |
+| `/sessions` | List saved sessions |
+| `/resume <id>` | Resume a saved session (replaces current conversation) |
+| `/view <id>` | View a session in a standalone rich pager |
+| `/rename <id> <title>` | Rename a saved session |
+| `/delete <id>` | Delete a saved session |
+| `/clear` | Clear history (auto-saves current session first) |
 | `/help` | Show help |
 
-Tab completion is available for slash commands and model keys.
+Tab completion is available for slash commands, model keys, renderer keys, and session IDs.
 
 ## Vim commands and mappings
 
@@ -566,16 +638,19 @@ Filetype-specific (Python, JavaScript/TypeScript):
 - **`_strip_config_from_schema` re-export** from `tools/__init__.py` — tests depend on it
 - **The `for_api()` method** in `ConversationHistory` — strips internal fields before sending to the model API; the SDK requires clean dicts
 - **The renderer dispatch in `ui.py`** — `"thinking"` and `"text"` go to the renderer; `"tool_call"`, `"tool_response"`, `"tool_approval"` are handled directly
+- **`session_store.py` save/load JSON schema** — the contract between save, resume, view, and migration
+- **`screen_utils.py` cursor primitives** — relied on by `RawReplaceRenderer` for in-place ANSI substitution; changing cursor-escape logic could break renderer output
+- **`ConversationHistory.save_to_file()` / `load_from_file()`** — used by session persistence; the JSON structure must remain loadable across versions
 
 ## Known issues
 
-1. **Version inconsistency:** `pyproject.toml` says `0.1.0a1`, `cli.py` and `ui.py` say `1.0.0`. `_version.py` reads from pyproject.toml but is unused.
+1. **`_version.py` is underused:** `ui.py` and `cli.py` correctly use `get_version()` (which reads from `pyproject.toml`), but many other places could benefit from it.
 
-2. **Dead code files:** `check_deps.py`, `display.py`, `display_strategies.py`, `rplugin/python3/tmux_agent.py` are not imported by anything live.
+2. **Dead code files:** `check_deps.py`, `display.py`, `display_strategies.py`, `rplugin/python3/tmux_agent.py`, `md_regex.py` (empty file) are not imported by anything live.
 
 3. **Dead dependency:** `autopep8` is in `pyproject.toml` but never imported.
 
-4. **Missing explicit dependencies:** `pydantic`, `python-dotenv`, and `httpx` are used directly but only available as transitive deps of `openai-agents`.
+4. **Missing explicit dependencies:** `pydantic`, `python-dotenv`, and `openai` are used directly but only available as transitive deps of `openai-agents`.
 
 5. **System prompt typos:** "wheather" → "whether" and "ouput" → "output" in the system prompt in `model_provider.py` (line 192).
 
@@ -587,12 +662,14 @@ Filetype-specific (Python, JavaScript/TypeScript):
 
 9. **`rplugin/python3/tmux_agent.py`** imports from nonexistent paths and will crash if Neovim loads it.
 
-10. **No renderer tests** — the renderer package has no unit tests yet.
+10. **No renderer tests** — the renderer package has no unit tests. `test_screen_utils.py` tests the screen utility primitives used by `RawReplaceRenderer`, but not the renderers themselves.
 
 11. **`RichBufferRenderer` ANSI escape codes** — the cursor-up/clear sequence (`\\033[{N}F\\033[J`) assumes the raw output is still visible on screen; if the terminal scrolls, the replacement may misalign.
 
-12. **`MarkdownItRenderer` stability boundary** — uses `\\n\\n` as the paragraph break heuristic; inline-only markdown (bold/italic/code without paragraph breaks) may not render until the response completes and `on_response_complete()` flushes the buffer.
+12. **`MarkdownItRenderer` is not registered** — the file exists (`markdown_it_renderer.py`) and its dependency (`markdown-it-py`) is declared, but it has no entry in `get_renderer()` or `AVAILABLE_RENDERERS`. Its streaming paragraph-boundary heuristic (`\\n\\n`) means inline-only markdown may not render until `on_response_complete()` flushes the buffer. If you want to activate it, stabilize the heuristic first, then register it.
 
 13. **No tests for `tracing.py`** — the pass-through decorator and conditional import logic have been verified manually but have no automated test coverage yet.
 
-14. **`/clear` command missing from help output** — `handle_special_commands` recognizes `/clear` but it's not listed in the `/help` response (the `app.py` help handler was inadvertently truncated during refactoring).
+14. **No tests for `session_store.py` or `view_conversation.py`** — both new files lack dedicated test coverage.
+
+15. **Default renderer is not `raw`** — the `get_renderer()` factory defaults to `"raw_replace"` when `COPANE_RENDERER` is unset. This is the currently intended default.
