@@ -74,6 +74,15 @@ def _view_conversation_script() -> Path:
     return Path(copane.__file__).parent.parent.parent / "view_conversation.py"
 
 
+# ── Formatting helpers ─────────────────────────────────────────────────
+
+def _fmt_tokens(n: int) -> str:
+    """Format a token count for display (e.g. 1234 → '1.2k')."""
+    if n >= 1000:
+        return f"{n/1000:.1f}k"
+    return str(n)
+
+
 # ── Environment loading ─────────────────────────────────────────────────
 
 def load_env_file(env_path: str | None = None):
@@ -159,14 +168,22 @@ def _print_sessions_list(agent):
             title_display = f" — {first[:60]}" if first else ""
 
         turns = entry.get("turn_count", 0)
+        inp = entry.get("input_tokens", 0)
+        out = entry.get("output_tokens", 0)
         model = entry.get("model", "?").split("/")[-1]  # just the model name
         updated = entry.get("last_updated", "")[:16]  # date part
+
+        # Token string: only show if we have real data
+        if inp or out:
+            tok_str = f"  ⬇{_fmt_tokens(inp)} ⬆{_fmt_tokens(out)}"
+        else:
+            tok_str = ""
 
         color = Colors.SUCCESS if is_current else Colors.RESET
         desc_color = Colors.INFO if is_current else Colors.DIM
 
         print_tuble(
-            (f"{marker}{sid[:16]}", f"{updated}  {model}  turns:{turns}{title_display}"),
+            (f"{marker}{sid[:16]}", f"{updated}  {model}  turns:{turns}{tok_str}{title_display}"),
             color, desc_color, spacing="20",
         )
     print()  # blank line after list
@@ -200,9 +217,17 @@ def _print_session_view(session_id: str):
             title = entry.get("title") or entry.get("first_user_message", "")[:60]
             model = entry.get("model", "?")
             turns = entry.get("turn_count", 0)
+            inp = entry.get("input_tokens", 0)
+            out = entry.get("output_tokens", 0)
+
             print_section_header(f"Session: {title}", Colors.ACCENT)
             print_tuble(("Model:", model), Colors.PRIMARY, Colors.RESET, spacing="20")
             print_tuble(("Turns:", str(turns)), Colors.PRIMARY, Colors.RESET, spacing="20")
+            if inp or out:
+                print_tuble(
+                    ("Tokens:", f"⬇{_fmt_tokens(inp)} input  ⬆{_fmt_tokens(out)} output"),
+                    Colors.PRIMARY, Colors.RESET, spacing="20",
+                )
             print()
             break
 
@@ -343,13 +368,19 @@ async def handle_special_commands(user_input: str) -> bool:
             return True
         # Show what we loaded
         title = ""
+        inp = 0
+        out = 0
         for entry in manifest:
             if entry.get("session_id") == matched:
                 title = entry.get("title") or entry.get("first_user_message", "")
+                inp = entry.get("input_tokens", 0)
+                out = entry.get("output_tokens", 0)
                 break
         print_success(f"Resumed: {title[:80]}")
         print_info(f"  {matched}", Colors.DIM)
         print_info(f"  {agent.get_message_count()} turns loaded", Colors.DIM)
+        if inp or out:
+            print_info(f"  ⬇{_fmt_tokens(inp)} input  ⬆{_fmt_tokens(out)} output", Colors.DIM)
         return True
 
     # ── /delete <session_id> ────────────────────────────────────────
