@@ -71,7 +71,8 @@ _current_renderer: Renderer | None = None
 def _view_conversation_script() -> Path:
     """Return the path to view_conversation.py, relative to the copane package."""
     import copane
-    return Path(copane.__file__).parent.parent.parent / "view_conversation.py"
+    # return Path(copane.__file__).parent.parent.parent / "view_conversation.py"
+    return Path(copane.__file__).parent / "view_conversation.py"
 
 
 # ── Formatting helpers ─────────────────────────────────────────────────

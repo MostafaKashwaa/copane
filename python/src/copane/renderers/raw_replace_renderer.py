@@ -156,7 +156,7 @@ class RawReplaceRenderer(Renderer):
             self._state = NormalState(self)
 
         line = get_colored(f'🔧 [{tool_name}]: ', Colors.ACCENT)
-        sys.stdout.write(f"\r{line}\033[k")
+        sys.stdout.write(f"\r{line}\033[K")
         sys.stdout.write('\n\r')
         # screen_utils.write_line(line)
         # screen_utils.write_clear(line)
@@ -172,7 +172,7 @@ class RawReplaceRenderer(Renderer):
     def on_tool_response_chunk(self, chunk: str) -> None:
         response, call_id = chunk
         call_row = self._tool_call_rows.get(call_id)
-        if not call_row:
+        if call_row is None:
             # This shouldn't happen, but if it does we can just print the response inline
             sys.stdout.write(f"\n{response}\n")
             sys.stdout.flush()
@@ -192,7 +192,7 @@ class RawReplaceRenderer(Renderer):
             result = response.strip()
 
         original_line = self._tool_call_text[call_id]
-        response_rows = self._term_width - len(original_line) + 2
+        response_rows = self._term_width - (screen_utils.visual_width(original_line) + 2)
 
         result = result.splitlines()[0] if result else "Empty response"
         formatted_response = get_colored(result[:response_rows], color)
@@ -278,11 +278,14 @@ class RawReplaceRenderer(Renderer):
         """Write *text* from column 0, clear remainder, advance to
         the next terminal row."""
         self._write_clear(text)
-        line_rows = screen_utils.screen_lines(text, self._term_width) - 1
+        # screen_lines returns 0 for empty text, but the \n below
+        # always advances the cursor by at least one screen row.
+        consumed = screen_utils.screen_lines(text, self._term_width)
+        if consumed == 0:
+            consumed = 1
         sys.stdout.write('\n\r')
         sys.stdout.flush()
-        self._consumed_rows += 1 + line_rows 
-        # self._write_line(text)
+        self._consumed_rows += consumed
         self._trailing_lines = 0
 
     # ── State transition ───────────────────────────────────────────
@@ -343,8 +346,12 @@ class RawReplaceRenderer(Renderer):
         leaves incomplete spans as raw markers, which provides the
         "markers appear then resolve" effect without ever
         duplicating text.
+
+        Block states (fence, table, blockquote) accumulate raw lines
+        and redraw on close — they do not participate in inline
+        trailing-line re-rendering.
         """
-        if isinstance(self._state, FenceState):
+        if not isinstance(self._state, NormalState):
             return
 
         formatted = format_inline(self._line_buf)
