@@ -137,6 +137,8 @@ def _build_agent(**overrides):
     mock_history = MagicMock(spec=ConversationHistory)
     mock_history.messages = []
     mock_history.estimate_memory_mb.return_value = 10.0  # well under 50 MB
+    mock_history.total_input_tokens = overrides.get("total_input_tokens", 0)
+    mock_history.total_output_tokens = overrides.get("total_output_tokens", 0)
     agent.history = mock_history
 
     # model config
