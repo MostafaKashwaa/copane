@@ -44,7 +44,7 @@ DIM_STYLE = Style(dim=True)
 
 # ── Message extraction ────────────────────────────────────────────────
 
-def load_messages(path: Path) -> list[dict]:
+def load_messages(path: Path) -> tuple[list[dict], int, int]:
     """Load a JSON file containing a list of conversation messages.
 
     Supports both a top-level list and a dict with a ``"messages"`` key.
@@ -53,12 +53,14 @@ def load_messages(path: Path) -> list[dict]:
         data = json.load(f)
 
     if isinstance(data, list):
-        return data
+        return data, 0, 0
     if isinstance(data, dict):
+        inp = data.get("input_tokens", 0)
+        out = data.get("output_tokens", 0)
         # Check for common wrapper keys
         for key in ("messages", "conversation", "history", "data"):
             if key in data and isinstance(data[key], list):
-                return data[key]
+                return data[key], inp, out
     raise ValueError(
         f"Unrecognised JSON structure in {path}.  Expected a list of "
         "messages or a dict with a 'messages' key."
@@ -88,7 +90,8 @@ def render_conversation(messages: list[dict], console: Console) -> None:
         turn_id = msg.get("_turn_id", "")
 
         if role == "user":
-            title = Text(f"User  (turn {turn_id})", style=USER_STYLE) if turn_id else Text("User", style=USER_STYLE)
+            title = Text(f"User  (turn {turn_id})", style=USER_STYLE) if turn_id else Text(
+                "User", style=USER_STYLE)
             panel = Panel(
                 content,
                 title=title,
@@ -99,7 +102,8 @@ def render_conversation(messages: list[dict], console: Console) -> None:
             console.print(panel)
 
         elif role == "assistant":
-            title = Text(f"Assistant  (turn {turn_id})", style=ASSISTANT_STYLE) if turn_id else Text("Assistant", style=ASSISTANT_STYLE)
+            title = Text(f"Assistant  (turn {turn_id})", style=ASSISTANT_STYLE) if turn_id else Text(
+                "Assistant", style=ASSISTANT_STYLE)
             try:
                 md = Markdown(content, code_theme="monokai")
             except Exception:
@@ -119,13 +123,19 @@ def render_conversation(messages: list[dict], console: Console) -> None:
         console.print()
 
 
-def show_summary(messages: list[dict], console: Console) -> None:
+def show_summary(
+    messages: list[dict],
+        console: Console,
+        input_tokens: int = 0,
+        output_tokens: int = 0
+) -> None:
     """Print a brief summary table."""
     total = len(messages)
     user_count = sum(1 for m in messages if m.get("role") == "user")
     assistant_count = sum(1 for m in messages if m.get("role") == "assistant")
 
-    table = Table(title="Conversation Summary", style="bold", border_style="dim")
+    table = Table(title="Conversation Summary",
+                  style="bold", border_style="dim")
     table.add_column("Metric", style="bold")
     table.add_column("Count")
 
@@ -133,6 +143,9 @@ def show_summary(messages: list[dict], console: Console) -> None:
     table.add_row("User messages", str(user_count))
     table.add_row("Assistant messages", str(assistant_count))
     table.add_row("Exchanges (turns)", str(min(user_count, assistant_count)))
+    if input_tokens > 0 or output_tokens > 0:
+        table.add_row("Input tokens", str(input_tokens))
+        table.add_row("Output tokens", str(output_tokens))
 
     console.print()
     console.print(table)
@@ -178,7 +191,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     try:
-        messages = load_messages(path)
+        messages, inp_tok, out_tok = load_messages(path)
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -197,24 +210,27 @@ def main(argv: list[str] | None = None) -> None:
         # Capture output into a string and pipe through less -R
         import io
         buf = io.StringIO()
-        pager_console = Console(file=buf, force_terminal=True, color_system="auto")
+        pager_console = Console(
+            file=buf, force_terminal=True, color_system="auto")
         render_conversation(conversation, pager_console)
         if not args.no_summary:
-            show_summary(conversation, pager_console)
+            show_summary(conversation, pager_console,
+                         input_tokens=inp_tok, output_tokens=out_tok)
 
         pager_text = buf.getvalue()
         _pipe_to_less(pager_text, path)
     else:
         render_conversation(conversation, console)
         if not args.no_summary:
-            show_summary(conversation, console)
+            show_summary(conversation, console,
+                         input_tokens=inp_tok, output_tokens=out_tok)
 
 
 def _pipe_to_less(text: str, source: Path) -> None:
     """Pipe *text* through ``less -R`` for interactive scrolling."""
     try:
         proc = subprocess.Popen(
-            ["less", "-R", "-I" , "+/── .*  \\(turn [0-9]*\\) ──"], # f"+/{source.name}"],
+            ["less", "-R", "-I", "+/── .*  \\(turn [0-9]*\\) ──"],
             stdin=subprocess.PIPE,
         )
         proc.communicate(input=text.encode("utf-8"))

@@ -30,6 +30,7 @@ from agents import (
     ToolApprovalItem,
 )
 from openai.types.responses import (
+    ResponseCompletedEvent,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningTextDeltaEvent,
     ResponseTextDeltaEvent,
@@ -121,6 +122,8 @@ class TmuxAgent:
             model=model,
             title=self._title,
             first_user_message=self._first_user_message,
+            input_tokens=self.history.total_input_tokens,
+            output_tokens=self.history.total_output_tokens,
         )
 
     def save_current_session(self):
@@ -151,6 +154,15 @@ class TmuxAgent:
         messages = session_store.load_session(session_id)
         if messages is None:
             return False
+
+        # Restore token counts from session metadata (v2) or zero (v1).
+        meta = session_store.load_session_meta(session_id)
+        if meta:
+            self.history.total_input_tokens = meta.get("input_tokens", 0)
+            self.history.total_output_tokens = meta.get("output_tokens", 0)
+        else:
+            self.history.total_input_tokens = 0
+            self.history.total_output_tokens = 0
 
         # Re-compress all tool outputs in the loaded messages using the
         # same summarizers that run at turn boundaries.  This handles
@@ -382,6 +394,11 @@ class TmuxAgent:
         pending_tool_calls: dict[str, tuple[str, Any]] = field(
             default_factory=dict
         )
+        # Per-invocation token counts (reset at the top of each runner
+        # re-creation loop in stream_response).  Flushed to
+        # self.history after each complete assistant response.
+        input_tokens: int = 0
+        output_tokens: int = 0
 
     @traceable(run_type="chain", name="Stream Response")
     async def stream_response(self, user_input: str):
@@ -422,6 +439,10 @@ class TmuxAgent:
                 yield ("tool_approval", (item, state))
 
             response = self._recreate_runner(response, state)
+
+        # Flush per-invocation token counts to session-level totals.
+        self.history.total_input_tokens += ctx.input_tokens
+        self.history.total_output_tokens += ctx.output_tokens
 
         self._store_reasoning(ctx.thinking_response)
         self.history.add_message("assistant", ctx.text_response)
@@ -502,8 +523,18 @@ class TmuxAgent:
     # ──────────────────── Event handlers ─────────────────────────────────
     def _handle_raw_event(
         self, event: RawResponsesStreamEvent, context: _StreamingContext
-    ) -> tuple[str, str] | None:
-        """Handle a single raw event from the response stream."""
+    ) -> tuple[str, Any] | None:
+        """Handle a single raw event from the response stream.
+
+        Yields ``("thinking", delta)`` for reasoning text,
+        ``("text", delta)`` for response text, and
+        ``("usage", {...})`` when the response completes with token
+        counts reported by the API.
+
+        Token counts are also accumulated into *context* so that
+        ``stream_response()`` can flush them to the session-level
+        history totals after each complete assistant response.
+        """
         if isinstance(
                 event.data, (ResponseReasoningTextDeltaEvent, ResponseReasoningSummaryTextDeltaEvent)):
             delta = event.data.delta or ""
@@ -513,6 +544,16 @@ class TmuxAgent:
             delta = event.data.delta or ""
             context.text_response += delta
             return ("text", delta)
+        elif isinstance(event.data, ResponseCompletedEvent):
+            usage = event.data.response.usage
+            if usage is not None:
+                context.input_tokens += usage.input_tokens
+                context.output_tokens += usage.output_tokens
+                return ("usage", {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "total_tokens": usage.total_tokens,
+                })
         return None
 
     def _handle_run_item_event(
