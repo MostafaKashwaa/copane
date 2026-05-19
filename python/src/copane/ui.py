@@ -186,6 +186,15 @@ def print_no_banner():
     print_success(f"{APP_NAME} ready. Ask away!\n", f"{STAR} ")
 
 
+# ── Token formatting helpers ───────────────────────────────────────────
+
+def _fmt_tokens(n: int) -> str:
+    """Format a token count for display (e.g. 1234 → '1.2k')."""
+    if n >= 1000:
+        return f"{n/1000:.1f}k"
+    return str(n)
+
+
 # ── Tool output helpers ────────────────────────────────────────────────
 
 def _format_tool_output(res: ToolResult) -> str:
@@ -238,59 +247,34 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
 
     agent = get_agent()
 
-    # Track the actual plain-text length (without ANSI codes) for the summary
-    plain_text_len = 0
+    # Token counts reported by the API at the end of each runner
+    # invocation.  Multiple ``response.completed`` events can fire
+    # per turn (one per tool-approval round), so we accumulate.
+    total_input_tokens = 0
+    total_output_tokens = 0
 
     try:
         renderer.on_response_begin()
-        tool_lines = {}
 
         async for kind, chunk in stream_generator:
             match kind:
                 case 'thinking':
                     renderer.on_thinking_chunk(chunk)
-                    plain_text_len += len(chunk)
 
                 case 'text':
                     renderer.on_text_chunk(chunk)
-                    plain_text_len += len(chunk)
+
+                case 'usage':
+                    # Accumulate token counts from the API.
+                    # chunk = {"input_tokens": int, "output_tokens": int, "total_tokens": int}
+                    total_input_tokens += chunk["input_tokens"]
+                    total_output_tokens += chunk["output_tokens"]
 
                 case 'tool_call':
-                    tool_name, tool_id = chunk
-                    # renderer.on_interrupt()
-                    # print(
-                    #     f"\n{get_colored(f'🔧 [{tool_name}]', Colors.ACCENT)}",
-                    #     end=" ", flush=True,
-                    # )
                     renderer.on_tool_call_chunk(chunk)
-                    # tool_lines[tool_id] = f"\n{get_colored(f'🔧 [{tool_name}]', Colors.ACCENT)}"
-
-                    # approximate: icon + brackets
-                    plain_text_len += len(chunk) + 5
 
                 case 'tool_response':
-                    output, call_id = chunk
-                    result = _format_tool_output(output)
-                    # renderer.on_interrupt()
                     renderer.on_tool_response_chunk(chunk)
-                    
-                    # if isinstance(output, ToolResult):
-                    #     color = Colors.SUCCESS if output.success else Colors.ERROR
-                    #     plain_text_len += len(output.output)
-                    # else:
-                    #     color = Colors.INFO
-                    #     plain_text_len += len(output)
-                    # print(
-                    #     f"{tool_lines.pop(call_id, '\n')}\n\t{get_colored(result.strip(), color)}",
-                    #     end="\n",
-                    #     flush=True
-                    # )
-
-                    # print(tool_lines.pop(call_id, "\n") \
-                    # + get_colored(result.strip(), color),
-                    # end="\n", flush=True)
-                    # print(f"{get_colored(result.strip(), color)}",
-                    # end="\n", flush=True)
 
                 case 'tool_approval':
                     item, state = chunk
@@ -316,7 +300,6 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
                 case _:
                     # Unknown event kind — pass through as text
                     renderer.on_text_chunk(str(chunk))
-                    plain_text_len += len(str(chunk))
 
         renderer.on_response_complete()
 
@@ -326,7 +309,14 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
             colors=[Colors.RESET, Colors.RESET, Colors.INFO],
             column_sizes=[0, 7, 0],
         )
-        print_success(f"Response complete ({plain_text_len} chars)")
+        if total_input_tokens or total_output_tokens:
+            print_success(
+                f"Response complete "
+                f"({_fmt_tokens(total_input_tokens)} input + "
+                f"{_fmt_tokens(total_output_tokens)} output tokens)"
+            )
+        else:
+            print_success("Response complete")
 
     except KeyboardInterrupt:
         print_warning("\n\n[Interrupted]\n", "")

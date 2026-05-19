@@ -7,6 +7,17 @@ in the same directory tracks all sessions.
 
 The session file is overwritten after each assistant response (crash
 resilience) and on /clear / exit.
+
+Session file format (v2)::
+
+    {
+        "messages": [...],
+        "input_tokens": 1234,
+        "output_tokens": 567
+    }
+
+Older v1 sessions stored a bare JSON array of messages.  ``load_session``
+handles both transparently.
 """
 
 from __future__ import annotations
@@ -89,6 +100,8 @@ def upsert_manifest_entry(
     turn_count: int = 0,
     title: str | None = None,
     first_user_message: str = "",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
 ) -> None:
     """Create or update a manifest entry for *session_id*."""
     manifest = load_manifest()
@@ -100,6 +113,8 @@ def upsert_manifest_entry(
             if model:
                 entry["model"] = model
             entry["turn_count"] = turn_count
+            entry["input_tokens"] = input_tokens
+            entry["output_tokens"] = output_tokens
             if title is not None:
                 entry["title"] = title
             if first_user_message and not entry.get("first_user_message"):
@@ -115,6 +130,8 @@ def upsert_manifest_entry(
         "last_updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "model": model,
         "turn_count": turn_count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "title": title,
         "first_user_message": first_user_message[:200] if first_user_message else "",
     }
@@ -156,16 +173,28 @@ def save_session(
     model: str = "",
     title: str | None = None,
     first_user_message: str = "",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
 ) -> None:
     """Write *messages* to the session file and update the manifest.
+
+    The session file is a dict with ``messages``, ``input_tokens``, and
+    ``output_tokens`` keys (v2 format).  Older v1 sessions stored a bare
+    array; ``load_session`` handles both.
 
     This overwrites the session file — it is designed to be called after
     every assistant response for crash resilience.
     """
     sp = _session_path(session_id)
     tmp = sp.with_suffix(".tmp")
+
+    data: dict[str, Any] = {
+        "messages": messages,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
     with open(tmp, "w") as f:
-        json.dump(messages, f, indent=2, default=str)
+        json.dump(data, f, indent=2, default=str)
     os.replace(tmp, sp)
 
     # Count turns (user messages = turns)
@@ -177,19 +206,55 @@ def save_session(
         turn_count=turn_count,
         title=title,
         first_user_message=first_user_message,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 
 def load_session(session_id: str) -> list[dict[str, Any]] | None:
-    """Load messages from a session file, or None if not found."""
+    """Load messages from a session file, or None if not found.
+
+    Handles both v2 format (``{"messages": [...], ...}``) and legacy v1
+    format (bare JSON array).  **Always returns a list of messages** —
+    token counts are available via ``load_session_meta()``.
+    """
     sp = _session_path(session_id)
     if not sp.exists():
         return None
     try:
         with open(sp) as f:
-            return json.load(f)
+            data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
+
+    if isinstance(data, list):
+        return data  # v1: bare array
+    if isinstance(data, dict):
+        return data.get("messages")  # v2: {"messages": [...], ...}
+    return None
+
+
+def load_session_meta(session_id: str) -> dict[str, Any] | None:
+    """Return the full session dict (messages + metadata), or None.
+
+    Unlike ``load_session``, this returns the complete v2 dict so
+    callers can access ``input_tokens``, ``output_tokens``, etc.
+    For v1 sessions the dict is synthesised with zero token counts.
+    """
+    sp = _session_path(session_id)
+    if not sp.exists():
+        return None
+    try:
+        with open(sp) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    if isinstance(data, list):
+        return {"messages": data, "input_tokens": 0, "output_tokens": 0}
+    if isinstance(data, dict):
+        return data
+    return None
 
 
 # ── Migration: old logs → sessions ──────────────────────────────────
@@ -278,11 +343,16 @@ def migrate_logs_to_sessions() -> dict[str, int]:
 
         turn_count = sum(1 for m in messages if m.get("role") == "user")
 
-        # Write session file
+        # Write session file (v2 format)
         sp = sessions_dir / f"{session_id}.json"
         tmp = sp.with_suffix(".tmp")
+        data = {
+            "messages": messages,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
         with open(tmp, "w") as f:
-            json.dump(messages, f, indent=2, default=str)
+            json.dump(data, f, indent=2, default=str)
         os.replace(tmp, sp)
 
         # Create manifest entry
@@ -292,6 +362,8 @@ def migrate_logs_to_sessions() -> dict[str, int]:
             turn_count=turn_count,
             title=None,
             first_user_message=first_user,
+            input_tokens=0,
+            output_tokens=0,
         )
         migrated_filenames.add(path.name)
         result["migrated"] += 1

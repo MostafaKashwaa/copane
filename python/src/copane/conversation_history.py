@@ -76,6 +76,12 @@ class ConversationHistory:
         self._trim_warned: bool = False
         self._new_turn_hook = new_turn_hook
 
+        # Session-level token accumulation (across all turns).
+        # Updated by TmuxAgent.stream_response() after each complete
+        # assistant response, using the usage reported by the API.
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+
     # ── public API ──────────────────────────────────────────────────
 
     @property
@@ -157,6 +163,8 @@ class ConversationHistory:
         self.messages = []
         self._trim_warned = False
         self._turn_id = 0
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
 
     def get_message_count(self) -> int:
         """Count user + assistant turn-pairs (rounds), ignoring reasoning."""
