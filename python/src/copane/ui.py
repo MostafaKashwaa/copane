@@ -195,41 +195,6 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-# ── Tool output helpers ────────────────────────────────────────────────
-
-def _format_tool_output(res: ToolResult) -> str:
-    """Return a compact one-liner status icon + first-line preview.
-
-    The result always starts with `` ✓`` (success) or `` ✗`` (failure).
-    """
-    if isinstance(res, str):
-        # Legacy support for tools that return raw strings instead of ToolResult
-        output = res.strip()
-        if output.startswith("[exit code: 0]"):
-            line0 = output.splitlines()[0] if output else ""
-            return f" ✓ {line0} "
-        elif output.startswith("[Error:") or output.startswith("[exit code:"):
-            line0 = output.splitlines()[0] if output else ""
-            return f" ✗ {line0} "
-        elif output.startswith("Wrote "):
-            return f" ✓ ({output})"
-        elif output:
-            line0 = output.splitlines()[0]
-            return f" ✓ {line0} "
-        else:
-            return " ✓ "
-    if res.success:
-        if res.output.strip():
-            line0 = res.output.splitlines()[0]
-            return f" ✓ {line0} "
-        else:
-            return " ✓ "
-    else:
-        error_text = res.error.splitlines()[0].strip(
-        ) if res.error else res.output.splitlines()[0].strip() if res.output else "Empty output" 
-        return f" ✗ {error_text} "
-
-
 # ── Streaming output ────────────────────────────────────────────────────
 
 async def print_streamed_response(stream_generator, renderer: Renderer | None = None):
