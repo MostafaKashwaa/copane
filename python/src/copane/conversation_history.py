@@ -16,14 +16,15 @@ from typing import Callable
 # Memory safety limits
 # ---------------------------------------------------------------------------
 
-# Hard message-count cap (never allow more than this, regardless of byte
-# budget).  Each turn adds 2-3 messages (user, reasoning, assistant).
-# After turn-boundary summarization this should never fire in normal use.
-MAX_MESSAGES = 100
+# Hard message-count cap - only user and assistant messages are counted.
+# Each turn adds exactly 2 messages (user + assistant). Tool calls/outputs 
+# and reasoning are ignored because turn-boundary summarization compresses
+# them to ~200-byte stubs that don't meaningfully affect memory or tokens.
+MAX_MESSAGES = 60
 
 # When we exceed MAX_MESSAGES we trim back to this fraction of MAX
 # so we don't trim on every single add_message call.
-TRIM_TARGET_FRACTION = 0.75
+TRIM_TARGET_FRACTION = 0.67  # keeps 40 messages (20 turns) when we hit 60.
 
 # Byte budget for the entire message history (tool outputs included).
 # Raised to 5 MB now that turn-boundary summarization keeps normal
@@ -308,18 +309,25 @@ class ConversationHistory:
             )
 
     def _trim_messages(self) -> None:
-        """Trim old messages when we exceed MAX_MESSAGES.
+        """Trim old messages when user+assistant count exceeds MAX_MESSAGES.
 
-        Trims back to TRIM_TARGET_FRACTION of MAX so we don't trim on
-        every single add_message call.  Warns once the first time
-        trimming occurs.
+        Only user and assistant messages count towards the cap — 
+        tool calls/outputs and reasoning are ignored because turn-boundary summarization 
+        compresses them to ~200-byte stubs that don't meaningfully affect memory or tokens.
+        Trims back to TRIM_TARGET_FRACTION of MAX_MESSAGES to avoid trimming on every 
+        single add_message call once the cap is hit.
         """
-        if len(self.messages) <= MAX_MESSAGES:
+        conversation_count = sum(
+            1 for m in self.messages if m.get("role") in ("user", "assistant")
+        ) 
+        if conversation_count <= MAX_MESSAGES:
             return
 
         if not self._trim_warned:
             print(
-                f"\n⚠ [copane] Message history full ({len(self.messages)}). "
+                f"\n⚠ [copane] Message history full "
+                f"({conversation_count} user+assistant messages). "
+                f"{len(self.messages) - conversation_count} tool/reasoning messages are not counted in the cap. "
                 f"Trimming oldest messages to conserve memory. "
                 f"Use /clear to reset.\n",
                 file=sys.stderr,
@@ -328,8 +336,13 @@ class ConversationHistory:
             self._trim_warned = True
 
         target = int(MAX_MESSAGES * TRIM_TARGET_FRACTION)
-        trimmed = len(self.messages) - target
-        self.messages = self.messages[trimmed:]
+        # Pop from the front until user+assistant count is at or below target
+        # Orphan repair after the loop cleans up any dangling tool calls/outputs.
+        while True:
+            n = sum(1 for m in self.messages if m.get("role") in ("user", "assistant"))
+            if n <= target or not self.messages:
+                break
+            self.messages.pop(0)
         self._repair_orphaned_outputs()
 
     def _trim_by_byte_budget(self) -> None:

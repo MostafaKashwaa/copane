@@ -268,8 +268,11 @@ def _logs_dir() -> Path:
 
 
 def migrate_logs_to_sessions() -> dict[str, int]:
-    """Migrate old ``~/.copane/logs/session_*.json`` files into the
-    session store.
+    """DEPRECATED: One-shot migration from v1 log files to v2 session store.
+
+    This was used to convert old ``~/.copane/logs/session_*.json`` files into the current
+    ``~/.copane/sessions/`` format.  It is no longer needed, but remains available for
+    manual invocation if users want to migrate old logs after the fact.
 
     Old log files are **left in place** — callers can delete them
     manually once they're satisfied.  A sentinel file tracks which

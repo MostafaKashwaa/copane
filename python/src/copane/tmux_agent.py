@@ -12,12 +12,9 @@ conversation shape is preserved.
 
 from dataclasses import dataclass, field
 import json
-import logging
 import os
 import sys
 import gc
-import time
-from pathlib import Path
 from typing import Any, Dict
 
 from agents import (
@@ -53,15 +50,6 @@ from copane.model_provider import ModelProvider
 from copane.conversation_history import ConversationHistory
 from copane import session_store
 
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s [%(levelname)s] %(message)s",
-#     handlers=[
-#         logging.FileHandler("tmux_agent.log"),
-#         logging.StreamHandler(sys.stdout)
-#     ]
-# )
-
 MAX_TOOL_TURNS = 50  # max turns for a single tool-using response
 
 # Prompt for the title-generation call (tiny, cheap, one-shot per session).
@@ -75,17 +63,15 @@ Reply with only the title, no quotes, no punctuation at the end."""
 class TmuxAgent:
     """TmuxAgent is an AI coding assistant that runs inside a tmux pane.
 
-    Conversation memory is managed through turn-boundary summarization:
-    tool outputs are compressed to metadata stubs in-place so memory
-    stays O(one turn), not O(total conversation), and the conversation
-    shape is preserved.
+    Conversation memory is managed through end-of-turn summarization:
+    tool outputs are compressed to metadata stubs in-place at the end
+    of each assistant response, so memory stays O(one turn), not
+    O(total conversation), and the conversation shape is preserved.
     """
 
     def __init__(self, name):
         self.name = name
-        self.history = ConversationHistory(
-            new_turn_hook=self._summarize_previous_turn
-        )
+        self.history = ConversationHistory(new_turn_hook=None)
         self.agent: Agent | None = None
         self.tools: list[Tool] = [
             read_file,
@@ -165,9 +151,9 @@ class TmuxAgent:
             self.history.total_output_tokens = 0
 
         # Re-compress all tool outputs in the loaded messages using the
-        # same summarizers that run at turn boundaries.  This handles
-        # sessions that were saved mid-turn (before the summarization
-        # hook fired), where raw outputs may still be present.
+        # same summarizers that run at end of turn.  This handles
+        # sessions that were saved mid-turn (before summarization ran),
+        # where raw outputs may still be present.
         self._summarize_all_tool_outputs(messages)
 
         # Truncate any reasoning that accumulated across turns.
@@ -204,39 +190,15 @@ class TmuxAgent:
 
         return True
 
-    # ── Full-history persistence (legacy) ───────────────────────────
-
-    def _save_full_history(self):
-        """Write the complete message list to disk before summarization.
-
-        Saved to ``~/.copane/logs/session_<timestamp>.json``.
-        Creates the directory if it doesn't exist.
-
-        .. note::
-
-            This is kept for the turn-boundary summarization hook but
-            is now redundant with ``_save_session()``.  We keep both
-            during the migration period so legacy log files are still
-            produced.
-        """
-        logs_dir = Path.home() / ".copane" / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-        path = logs_dir / f"session_{ts}.json"
-        try:
-            self.history.save_to_file(str(path))
-        except (TypeError, OSError) as e:
-            logging.warning("\nFailed to save full history: %s", e)
-
-    # ── Turn-boundary summarization ─────────────────────────────────
+    # ── Tool output summarization ───────────────────────────────────
 
     @staticmethod
     def _summarize_all_tool_outputs(messages: list[dict]):
         """Compress every ``function_call_output`` in *messages* in-place.
 
-        Runs each output through its registered tool summarizer (same
-        as the per-turn hook).  Used on resume to compact sessions that
-        may have been saved before the turn-boundary hook fired.
+        Runs each output through its registered tool summarizer.
+        Used on resume to compact sessions that may have been saved
+        before the end-of-turn summarization ran.
         """
         for m in messages:
             if m.get("type") != "function_call_output":
@@ -271,27 +233,23 @@ class TmuxAgent:
                         if len(text) > max_chars:
                             s["text"] = text[:max_chars] + "..."
 
-    def _summarize_previous_turn(self, messages: list[dict], prev_turn_id: int):
-        """Compress tool outputs from the previous turn into metadata stubs.
+    def _summarize_current_turn(self):
+        """Compress tool outputs from the turn that just completed.
 
-        Called by ``ConversationHistory.add_message()`` at user-message
-        boundaries, *before* the turn id is incremented.  Saves full
-        history to disk first, then replaces each tool-output message's
-        ``output`` field in-place with its summarised stub.  Nothing is
-        removed or moved — the conversation shape is preserved.
+        Called at the end of ``stream_response()`` so that session
+        files always contain stubs (compact, no dead weight) and
+        ``self.messages`` stays small between turns.
 
-        Delegates the actual summarization to
-        ``_summarize_all_tool_outputs``, filtering to the single turn.
+        Uses the same per-tool summarizers as
+        ``_summarize_all_tool_outputs``, filtering on the current
+        ``turn_id``.
         """
-        if prev_turn_id == 0:
-            return  # first turn — nothing to summarize
+        current_turn = self.history.turn_id
+        if current_turn == 0:
+            return
 
-        # Save full history before modifying it
-        self._save_full_history()
-
-        # Only summarize messages belonging to the previous turn
-        for m in messages:
-            if m.get("_turn_id") != prev_turn_id:
+        for m in self.history.messages:
+            if m.get("_turn_id") != current_turn:
                 continue
             if m.get("type") != "function_call_output":
                 continue
@@ -460,6 +418,10 @@ class TmuxAgent:
                 pass
             finally:
                 self._title_generated = True
+
+        # Summarize the turn that just completed so session files
+        # always contain stubs, not full tool outputs.
+        self._summarize_current_turn()
 
         self._save_session()  # ← save after every complete assistant response
         self._print_memory_warning()
