@@ -69,6 +69,11 @@ def _strip_config_from_schema(schema: dict) -> dict:
     API (OpenAI requires every property to have a ``type``).  Removing it
     from the schema fixes the 400 error for OpenAI-based models.
 
+    For tools with no parameters, the schema may have empty ``properties``
+    and empty ``required``. Some APIs (like Groq) reject this as invalid
+    because ``required`` is present but ``properties`` is missing or empty.
+    We clean up empty required arrays to fix this.
+
     This function mutates the schema *in-place* for simplicity and also
     returns it.
     """
@@ -78,6 +83,11 @@ def _strip_config_from_schema(schema: dict) -> dict:
     required = schema.get("required", [])
     if "config" in required:
         required.remove("config")
+    # If there are no properties and no required fields, remove the
+    # "required" key entirely — some APIs (e.g. Groq) reject
+    # {"properties": {}, "required": []} as invalid.
+    if not props and not required:
+        schema.pop("required", None)
     return schema
 
 
@@ -148,5 +158,5 @@ def _truncate(text: str, limit: int, label: str = "output") -> tuple[str, bool]:
     Returns ``(text, was_truncated)``.
     """
     if len(text) > limit:
-        return f"{text[:limit]}\n[... {label} truncated to {limit} chars]", True
+        return f"{text[:limit]}\n[..., {label} truncated to {limit} chars]", True
     return text, False
