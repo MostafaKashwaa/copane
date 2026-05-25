@@ -8,10 +8,8 @@ Covers all sections from ``guides/TMUX_AGENT_TEST_PLAN.md`` except the
 
 import gc
 import json
-import logging
 import sys
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agents import (
@@ -219,6 +217,11 @@ class TestInit:
         assert isinstance(a.model_provider, ModelProvider)
         assert a.model_provider.model_config is a.model_config
 
+    def test_no_new_turn_hook(self):
+        """_new_turn_hook is None — summarization runs at end of turn."""
+        a = TmuxAgent(name="test")
+        assert a.history._new_turn_hook is None
+
 
 # -------------------------------------------------------------------
 # 2. Model management delegators
@@ -261,228 +264,7 @@ class TestModelDelegators:
 
 
 # -------------------------------------------------------------------
-# 3. _save_full_history
-# -------------------------------------------------------------------
-
-
-class TestSaveFullHistory:
-    @pytest.fixture
-    def agent(self, tmp_path):
-        """Agent whose home dir is redirected to tmp_path."""
-        a = _build_agent()
-        with patch.object(Path, "home", return_value=tmp_path):
-            yield a
-
-    def test_creates_dir_and_delegates_to_history(self, agent, tmp_path):
-        agent._save_full_history()
-        agent.history.save_to_file.assert_called_once()
-        path_arg = agent.history.save_to_file.call_args[0][0]
-        assert path_arg.startswith(
-            str(tmp_path / ".copane" / "logs" / "session_"))
-
-    def test_dir_already_exists_no_error(self, agent, tmp_path):
-        # Create the dir first
-        (tmp_path / ".copane" / "logs").mkdir(parents=True)
-        agent._save_full_history()
-        agent.history.save_to_file.assert_called_once()
-
-    def test_filename_is_iso8601(self, agent, tmp_path):
-        agent._save_full_history()
-        path_arg = agent.history.save_to_file.call_args[0][0]
-        fname = Path(path_arg).name  # e.g. session_2025-06-15T10:30:00.json
-        assert fname.startswith("session_")
-        assert fname.endswith(".json")
-        # Rough ISO 8601 check
-        body = fname[len("session_"):-len(".json")]
-        assert "T" in body
-        assert body.count(":") == 2
-
-    def test_oserror_logged(self, agent, tmp_path, caplog):
-        """When save_to_file raises OSError, the exception is caught and logged."""
-        agent.history.save_to_file.side_effect = OSError("disk full")
-        with caplog.at_level(logging.WARNING):
-            agent._save_full_history()
-        assert "Failed to save full history" in caplog.text
-
-    def test_typeerror_logged(self, agent, tmp_path, caplog):
-        agent.history.save_to_file.side_effect = TypeError("bad type")
-        with caplog.at_level(logging.WARNING):
-            agent._save_full_history()
-        assert "Failed to save full history" in caplog.text
-
-    def test_save_delegates_to_history(self, agent, tmp_path):
-        agent._save_full_history()
-        agent.history.save_to_file.assert_called_once()
-        # Verify path is correct
-        called_path = Path(agent.history.save_to_file.call_args[0][0])
-        assert called_path.parent == tmp_path / ".copane" / "logs"
-
-
-# -------------------------------------------------------------------
-# 4. _summarize_previous_turn
-# -------------------------------------------------------------------
-
-
-class TestSummarizePreviousTurn:
-    @pytest.fixture
-    def agent(self):
-        a = _build_agent()
-        # Prevent _save_full_history side effects
-        a._save_full_history = MagicMock()
-        return a
-
-    def _message(self, type_, turn_id, tool_name="read_file", output="raw", **extra):
-        m = {
-            "type": type_,
-            "_turn_id": turn_id,
-            "_tool_name": tool_name,
-            "_tool_args": {"path": "/x"},
-            "output": output,
-        }
-        m.update(extra)
-        return m
-
-    # ── skip when turn zero ──
-
-    def test_skip_when_turn_zero(self, agent):
-        msgs = [self._message("function_call_output", 0)]
-        original = json.dumps(msgs)
-        agent._summarize_previous_turn(msgs, 0)
-        assert json.dumps(msgs) == original
-        agent._save_full_history.assert_not_called()
-
-    # ── filtering ──
-
-    def test_messages_with_wrong_turn_id_skipped(self, agent):
-        msgs = [
-            self._message("function_call_output", 1),
-            self._message("function_call_output", 2),
-        ]
-        agent._summarize_previous_turn(msgs, 1)
-        # Only the first (turn 1) should be touched
-        assert msgs[0]["output"] != "raw"  # summarized
-        assert msgs[1]["output"] == "raw"  # NOT summarized (wrong turn)
-
-    def test_messages_with_wrong_type_skipped(self, agent):
-        msgs = [
-            {"type": "function_call", "_turn_id": 1, "output": "keep-me"},
-        ]
-        agent._summarize_previous_turn(msgs, 1)
-        assert msgs[0]["output"] == "keep-me"
-
-    # ── summarizer dispatch ──
-
-    def test_no_summarizer_for_tool_skipped(self, agent):
-        msgs = [
-            self._message("function_call_output", 1,
-                          tool_name="nonexistent_tool"),
-        ]
-        agent._summarize_previous_turn(msgs, 1)
-        assert msgs[0]["output"] == "raw"
-
-    def test_summarizer_returns_none_output_unchanged(self, agent):
-        """When summarizer returns None, output is left alone."""
-        msgs = [
-            self._message("function_call_output", 1, tool_name="read_file"),
-        ]
-        with patch.dict(
-            tools_pkg.TOOL_SUMMARIZERS,
-            {"read_file": lambda args, out: None},
-        ):
-            agent._summarize_previous_turn(msgs, 1)
-        # Summarizer returned None → output unchanged
-        assert msgs[0]["output"] == "raw"
-
-    def test_summarizer_replaces_output(self, agent):
-        msgs = [
-            self._message("function_call_output", 1, tool_name="read_file"),
-        ]
-        with patch.dict(
-            tools_pkg.TOOL_SUMMARIZERS,
-            {"read_file": lambda args, out: "- read_file(path=/x): 5 lines"},
-        ):
-            agent._summarize_previous_turn(msgs, 1)
-        assert msgs[0]["output"] == "- read_file(path=/x): 5 lines"
-
-    def test_multiple_outputs_all_summarized(self, agent):
-        msgs = [
-            self._message("function_call_output", 1, tool_name="read_file"),
-            self._message("function_call_output", 1, tool_name="run_command"),
-        ]
-        with patch.dict(
-            tools_pkg.TOOL_SUMMARIZERS,
-            {
-                "read_file": lambda args, out: "sum-read",
-                "run_command": lambda args, out: "sum-cmd",
-            },
-        ):
-            agent._summarize_previous_turn(msgs, 1)
-        assert msgs[0]["output"] == "sum-read"
-        assert msgs[1]["output"] == "sum-cmd"
-
-    def test_missing_tool_args_defaults_to_empty_dict(self, agent):
-        msgs = [
-            {
-                "type": "function_call_output",
-                "_turn_id": 1,
-                "_tool_name": "read_file",
-                "output": "raw",
-                # no _tool_args
-            },
-        ]
-        captured_args = []
-
-        def capture(args, out):
-            captured_args.append(args)
-            return "summarized"
-
-        with patch.dict(tools_pkg.TOOL_SUMMARIZERS, {"read_file": capture}):
-            agent._summarize_previous_turn(msgs, 1)
-        assert captured_args[0] == {}
-
-    def test_calls_save_full_history_before_summarizing(self, agent):
-        msgs = [
-            self._message("function_call_output", 1, tool_name="read_file"),
-        ]
-        call_order = []
-
-        def _save():
-            call_order.append("save")
-
-        def summarizer(args, out):
-            call_order.append("summarize")
-            return "summarized"
-
-        agent._save_full_history = MagicMock(side_effect=_save)
-        with patch.dict(tools_pkg.TOOL_SUMMARIZERS, {"read_file": summarizer}):
-            agent._summarize_previous_turn(msgs, 1)
-        assert call_order == ["save", "summarize"]
-
-    def test_summarizer_receives_correct_args_and_output(self, agent):
-        msgs = [
-            {
-                "type": "function_call_output",
-                "_turn_id": 1,
-                "_tool_name": "read_file",
-                "_tool_args": {"path": "/tmp/x", "start_line": 1},
-                "output": "file contents here",
-            },
-        ]
-        captured = []
-
-        with patch.dict(
-            tools_pkg.TOOL_SUMMARIZERS,
-            {"read_file": lambda a, o: captured.append((a, o)) or "ok"},
-        ):
-            agent._summarize_previous_turn(msgs, 1)
-        assert captured[0] == (
-            {"path": "/tmp/x", "start_line": 1},
-            "file contents here",
-        )
-
-
-# -------------------------------------------------------------------
-# 5. handle_tool_approval — additional edge cases
+# 3. handle_tool_approval — additional edge cases
 #    (existing base tests live in test_tool_approval.py)
 # -------------------------------------------------------------------
 
@@ -538,7 +320,7 @@ class TestToolApprovalEdgeCases:
 
 
 # -------------------------------------------------------------------
-# 6. _StreamingContext
+# 4. _StreamingContext
 # -------------------------------------------------------------------
 
 
@@ -564,7 +346,7 @@ class TestStreamingContext:
 
 
 # -------------------------------------------------------------------
-# 7. _handle_raw_event
+# 5. _handle_raw_event
 # -------------------------------------------------------------------
 
 
@@ -621,7 +403,7 @@ class TestHandleRawEvent:
 
 
 # -------------------------------------------------------------------
-# 8. _handle_run_item_event — tool_called
+# 6. _handle_run_item_event — tool_called
 # -------------------------------------------------------------------
 
 
@@ -707,7 +489,7 @@ class TestHandleRunItemToolCalled:
 
 
 # -------------------------------------------------------------------
-# 9. _handle_run_item_event — tool_output
+# 7. _handle_run_item_event — tool_output
 # -------------------------------------------------------------------
 
 
@@ -805,7 +587,7 @@ class TestHandleRunItemToolOutput:
 
 
 # -------------------------------------------------------------------
-# 10. _handle_run_item_event — unknown event name
+# 8. _handle_run_item_event — unknown event name
 # -------------------------------------------------------------------
 
 
@@ -822,7 +604,7 @@ class TestHandleRunItemUnknown:
 
 
 # -------------------------------------------------------------------
-# 11. _process_runner_events
+# 9. _process_runner_events
 # -------------------------------------------------------------------
 
 
@@ -885,7 +667,7 @@ class TestProcessRunnerEvents:
 
 
 # -------------------------------------------------------------------
-# 12. _store_reasoning
+# 10. _store_reasoning
 # -------------------------------------------------------------------
 
 
@@ -904,7 +686,7 @@ class TestStoreReasoning:
 
 
 # -------------------------------------------------------------------
-# 13. _print_memory_warning
+# 11. _print_memory_warning
 # -------------------------------------------------------------------
 
 
@@ -944,7 +726,7 @@ class TestPrintMemoryWarning:
 
 
 # -------------------------------------------------------------------
-# 14. _recreate_runner
+# 12. _recreate_runner
 # -------------------------------------------------------------------
 
 
@@ -988,7 +770,7 @@ class TestRecreateRunner:
 
 
 # -------------------------------------------------------------------
-# 15. stream_response — structural
+# 13. stream_response — structural
 # -------------------------------------------------------------------
 
 
@@ -1134,7 +916,7 @@ class TestStreamResponse:
 
 
 # -------------------------------------------------------------------
-# 16. get_agent singleton
+# 14. get_agent singleton
 # -------------------------------------------------------------------
 
 
@@ -1162,7 +944,7 @@ class TestGetAgent:
 
 
 # -------------------------------------------------------------------
-# 17. Bug regression guards
+# 15. Bug regression guards
 # -------------------------------------------------------------------
 
 
@@ -1233,7 +1015,7 @@ class TestBugRegressionGuards:
 
 
 # -------------------------------------------------------------------
-# 18. Delegator completeness
+# 16. Delegator completeness
 # -------------------------------------------------------------------
 
 
