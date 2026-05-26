@@ -75,6 +75,19 @@ class TestToolSchema:
             except (TypeError, ValueError) as e:
                 assert False, f"{tool.name} schema not JSON-serializable: {e}"
 
+    def test_get_current_dir_has_no_required_key(self):
+        """get_current_dir takes no parameters — ``required`` must be absent.
+
+        Groq's API rejects schemas where ``required`` is present but
+        empty.  We strip the key entirely when both ``properties`` and
+        ``required`` are empty.
+        """
+        schema = tools_module.get_current_dir.params_json_schema
+        assert "required" not in schema, (
+            "get_current_dir schema must not contain a 'required' key "
+            "(empty required breaks Groq compatibility)"
+        )
+
     def test_tool_names_are_unique(self):
         """No two tools may share the same name."""
         names = [tool.name for tool in _ALL_TOOLS]
