@@ -916,7 +916,55 @@ class TestStreamResponse:
 
 
 # -------------------------------------------------------------------
-# 14. get_agent singleton
+# 14. _summarize_current_turn
+# -------------------------------------------------------------------
+
+
+class TestSummarizeCurrentTurn:
+    """Assert summarization fires at the end of every complete response."""
+
+    @pytest.fixture
+    def agent(self):
+        a = _build_agent()
+        a.agent = MagicMock(spec=Agent)
+        a.setup = MagicMock()
+        a._store_reasoning = MagicMock()
+        a._print_memory_warning = MagicMock()
+        return a
+
+    @pytest.mark.asyncio
+    async def test_summarize_called_before_save_session(self, agent):
+        """``_summarize_current_turn`` must be called before ``_save_session``."""
+        call_order = []
+
+        def _fake_summarize():
+            call_order.append("summarize")
+
+        def _fake_save():
+            call_order.append("save")
+
+        agent._summarize_current_turn = _fake_summarize
+        agent._save_session = _fake_save
+
+        result = MagicMock()
+        result.interruptions = []
+
+        async def _empty_stream():
+            return
+            yield  # pragma: no cover — makes this an async generator
+
+        result.stream_events = _empty_stream
+        result.to_state = MagicMock(return_value=MagicMock())
+
+        with patch.object(Runner, "run_streamed", return_value=result):
+            async for _ in agent.stream_response("hi"):
+                pass
+
+        assert call_order == ["summarize", "save"]
+
+
+# -------------------------------------------------------------------
+# 15. get_agent singleton
 # -------------------------------------------------------------------
 
 
@@ -944,7 +992,7 @@ class TestGetAgent:
 
 
 # -------------------------------------------------------------------
-# 15. Bug regression guards
+# 16. Bug regression guards
 # -------------------------------------------------------------------
 
 
@@ -1015,7 +1063,7 @@ class TestBugRegressionGuards:
 
 
 # -------------------------------------------------------------------
-# 16. Delegator completeness
+# 17. Delegator completeness
 # -------------------------------------------------------------------
 
 
