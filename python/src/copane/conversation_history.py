@@ -17,7 +17,7 @@ from typing import Callable
 # ---------------------------------------------------------------------------
 
 # Hard message-count cap - only user and assistant messages are counted.
-# Each turn adds exactly 2 messages (user + assistant). Tool calls/outputs 
+# Each turn adds exactly 2 messages (user + assistant). Tool calls/outputs
 # and reasoning are ignored because turn-boundary summarization compresses
 # them to ~200-byte stubs that don't meaningfully affect memory or tokens.
 MAX_MESSAGES = 60
@@ -319,7 +319,7 @@ class ConversationHistory:
         """
         conversation_count = sum(
             1 for m in self.messages if m.get("role") in ("user", "assistant")
-        ) 
+        )
         if conversation_count <= MAX_MESSAGES:
             return
 
@@ -336,13 +336,19 @@ class ConversationHistory:
             self._trim_warned = True
 
         target = int(MAX_MESSAGES * TRIM_TARGET_FRACTION)
-        # Pop from the front until user+assistant count is at or below target
-        # Orphan repair after the loop cleans up any dangling tool calls/outputs.
-        while True:
-            n = sum(1 for m in self.messages if m.get("role") in ("user", "assistant"))
-            if n <= target or not self.messages:
-                break
-            self.messages.pop(0)
+
+        # Scan backwards from the end; slice once when we've found "target"
+        # user+assistant messages to keep. Single O(n) pass.
+        keep_count = 0
+        cutoff = len(self.messages)
+        for i in range(len(self.messages) - 1, -1, -1):
+            m = self.messages[i]
+            if m.get("role") in ("user", "assistant"):
+                keep_count += 1
+                if keep_count >= target:
+                    cutoff = i
+                    break
+        self.messages = self.messages[cutoff:]
         self._repair_orphaned_outputs()
 
     def _trim_by_byte_budget(self) -> None:
