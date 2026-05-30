@@ -406,8 +406,7 @@ function! tmux_agent#send(...) abort
   let l:escaped = shellescape(l:text)
 
   call system('tmux set-buffer -b copane_send ' . l:escaped)
-  call system('tmux paste-buffer -b copane_send -t ' . l:pane_id)
-  call system('tmux send-keys -t ' . l:pane_id . '  C-j')
+  call system('tmux paste-buffer -b copane_send -t ' . l:pane_id . ' -p')
 
   echohl Comment
   echo 'copane: Sent ' . len(l:text) . ' chars to pane ' . l:pane_id
