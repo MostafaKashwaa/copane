@@ -27,8 +27,8 @@ copane/                              # Git repo root (= Vim plugin root)
 │   ├── copane.vim                   # Config-file editing helpers (edit model config, secrets)
 │   └── tmux_agent.vim               # Core tmux pane lifecycle (open, close, send, focus, toggle)
 ├── ftplugin/
-│   ├── python.vim                   # Python-specific mappings (explain, test, refactor)
-│   └── javascript.vim               # JS/TS-specific mappings
+│   ├── python.vim                   # Python-specific mappings (explain, test)
+│   └── javascript.vim               # JS/TS-specific mappings (explain, test)
 ├── after/ftplugin/
 │   └── python.vim                   # Compatibility shims for python-mode, jedi, ALE, coc, etc.
 ├── doc/copane.txt                   # Vim help file (:help copane)
@@ -483,16 +483,20 @@ The model must re-read files each turn to get current content.
 
 ### Safety nets (belt-and-suspenders)
 
+Each turn adds exactly 2 messages (user + assistant). Tool calls, tool outputs,
+and reasoning blocks are **not** counted because turn-boundary summarization
+compresses them to ~200-byte stubs that don't meaningfully affect memory or tokens.
+
 | Mechanism | Limit | Location |
 |-----------|-------|----------|
-| Message count cap | 100 messages | `conversation_history.py` `MAX_MESSAGES` |
-| Trim target | 75 messages (75% of cap) | `TRIM_TARGET_FRACTION` |
+| Message count cap | 60 user/assistant messages | `conversation_history.py` `MAX_MESSAGES` |
+| Trim target | 40 messages (67% of cap) | `TRIM_TARGET_FRACTION` |
 | Byte budget | 5 MB total | `MAX_HISTORY_BYTES` |
 | Byte-budget trim | Keep 20 most recent | `KEEP_RECENT_MESSAGES` |
 | Reasoning truncation | 8,000 chars per reasoning block | `MAX_REASONING_CHARS` |
 | read_file safety | 50,000 chars per read | `_MAX_READ_FILE_SAFETY_LIMIT` |
 
-### Session persistence (primary)
+### Session persistence
 
 After every assistant response, `TmuxAgent._save_session()` persists the
 full conversation to `~/.copane/sessions/<id>.json` and updates
@@ -506,14 +510,14 @@ and restores the turn counter so the conversation continues seamlessly.
 
 Sessions are also saved on `/clear` and on normal exit (Ctrl+D).
 
-### Legacy full-history persistence
+### Legacy log migration
 
-Before each summarization, the complete message list is ALSO saved to
-`~/.copane/logs/session_<timestamp>.json` via `TmuxAgent._save_full_history()`.
-This is a legacy mechanism kept for compatibility during the migration
-period. `app.py` runs `migrate_logs_to_sessions()` at startup to import
-old log files into the session store (old files are left in place; a
-sentinel file prevents duplicate imports).
+`app.py` calls `session_store.migrate_logs_to_sessions()` at startup to import
+old log files from `~/.copane/logs/session_*.json` into the session store.
+This is a backwards-compatibility shim — **new conversations are only saved via
+`_save_session()` to `~/.copane/sessions/`.** The legacy `_save_full_history()`
+path no longer exists. Old log files are left in place after migration; a
+sentinel file prevents duplicate imports.
 
 ### Orphan repair
 
@@ -531,7 +535,7 @@ the same `call_id`.
 | History | `~/.local/share/copane/.copane_history` | prompt_toolkit REPL history |
 | Session files | `~/.copane/sessions/<id>.json` | Per-session message history + metadata |
 | Session manifest | `~/.copane/sessions/manifest.json` | Index of all saved sessions (id, title, model, turn count, timestamps) |
-| Session logs (legacy) | `~/.copane/logs/session_*.json` | Full message history dumps from the legacy persistence path |
+| Session logs (legacy) | `~/.copane/logs/session_*.json` | Full message history dumps from the legacy persistence path (no longer written) |
 
 The model config is auto-generated on first run with defaults for DeepSeek,
 OpenAI, and local Ollama. Users can add any OpenAI-compatible endpoint
@@ -574,6 +578,13 @@ cd python
 .venv/bin/python -m pytest tests/ -v
 ```
 
+To run a single test or filter by name:
+
+```bash
+.venv/bin/python -m pytest tests/test_file.py::test_name -q
+.venv/bin/python -m pytest tests/ -k "pattern" -v
+```
+
 CI runs `pytest -q --tb=short` in the `python/` directory on Python 3.12.
 
 The test suite uses one test file per tool, plus tests for the agent,
@@ -581,7 +592,7 @@ model provider, model config, conversation history, screen utilities, and
 tool schema/fixtures.
 `conftest.py` provides `tmp_dir`, `sample_file` fixtures and `invoke()` helper.
 
-NOTE: The `test_tool_run_command.py` contains a test for timeout behavior. It runs a command that sleeps for 60 seconds and expects it to be killed after 30 seconds. If you tried to run this test it would timeout and fail. If it fails in the scope you're testing and you need to verify it's working, ask the user to run it manually.
+NOTE: The `test_tool_run_command.py` contains a test for timeout behavior. It runs a command that sleeps for 60 seconds and expects it to be killed after 30 seconds. If you tried to run this test it would timeout and fail. If it fails in the scope you're testing and you need to verify it's working, ask the user to run it manually. To skip it: `pytest tests/ -k "not timeout"`.
 
 ## In-repl commands
 
@@ -623,7 +634,6 @@ Filetype-specific (Python, JavaScript/TypeScript):
 | `<leader>ta` | Send code |
 | `<leader>te` | Explain code |
 | `<leader>tt` | Write tests |
-| `<leader>tr` | Refactor code |
 
 ## What NOT to change without careful thought
 
@@ -654,7 +664,7 @@ Filetype-specific (Python, JavaScript/TypeScript):
 
 5. **System prompt typos:** "wheather" → "whether" and "ouput" → "output" in the system prompt in `model_provider.py` (line 192).
 
-6. **Stale backup files:** `*.bak`, `*.swp` files in `src/copane/`.
+6. **`<leader>te` mapping conflict:** The global mapping `<leader>te` is `:CopaneEditSecrets` (in `plugin/copane.vim`). The ftplugin files (`python.vim`, `javascript.vim`) also map `<leader>te` to Explain. The ftplugin buffer-local mapping shadows the global one, so `:CopaneEditSecrets` is inaccessible from Python/JS buffers.
 
 7. **`list_files` has no `_truncate()` call** — output is limited only by `head -200` (entry count), not by byte length; unlike `run_command` and `grep_files` which apply `_truncate()`.
 
@@ -670,6 +680,6 @@ Filetype-specific (Python, JavaScript/TypeScript):
 
 13. **No tests for `tracing.py`** — the pass-through decorator and conditional import logic have been verified manually but have no automated test coverage yet.
 
-14. **No tests for `session_store.py` or `view_conversation.py`** — both new files lack dedicated test coverage.
+14. **No tests for `session_store.py` or `view_conversation.py`** — both files lack dedicated test coverage.
 
 15. **Default renderer is not `raw`** — the `get_renderer()` factory defaults to `"raw_replace"` when `COPANE_RENDERER` is unset. This is the currently intended default.
