@@ -19,6 +19,7 @@ from ._base import (
 from ._base import _strip_config_from_schema  # re-export for test_schema
 
 # ── Tools ─────────────────────────────────────────────────────────────
+from .edit_file import edit_file, summarize as _sum_edit
 from .get_current_dir import get_current_dir, summarize as _sum_getcwd
 from .grep_files import grep_files, summarize as _sum_grep
 from .list_files import list_files, summarize as _sum_ls
@@ -28,6 +29,7 @@ from .write_file import write_file, summarize as _sum_write
 
 # ── Lookup table for the agent's dispatch loop ────────────────────────
 TOOL_SUMMARIZERS: dict[str, "function"] = {
+    "edit_file": _sum_edit,
     "read_file": _sum_read,
     "run_command": _sum_cmd,
     "grep_files": _sum_grep,

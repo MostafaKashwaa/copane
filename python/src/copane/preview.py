@@ -47,6 +47,18 @@ def format_tool_preview(item: ToolApprovalItem) -> str:
         content = args.get('content', '')
         diff = format_diff(path, content)
         return f"Tool: {tool_name}\nPath: {path}\n---\n{diff}\n---"
+    elif 'edit_file' in tool_name or tool_name == 'edit_file':
+        path = args.get('path', '(unknown)')
+        old = args.get('old_string', '')
+        new = args.get('new_string', '')
+        if os.path.exists(path):
+            with open(path) as f:
+                original = f.read()
+            new_content = original.replace(old, new, 1)
+            diff = format_diff(path, new_content)
+        else:
+            diff = f"(file not found: {path})"
+        return f"Tool: {tool_name}\nPath: {path}\n---\n{diff}\n---"
     elif 'delete_file' in tool_name or tool_name == 'delete_file':
         path = args.get('path', '(unknown)')
         return f"Tool: {tool_name}\nPath: {path}\n(Note: This will delete the file if approved)"

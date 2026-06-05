@@ -45,17 +45,33 @@ DIM_STYLE = Style(dim=True)
 # ── Message extraction ────────────────────────────────────────────────
 
 def load_messages(path: Path) -> list[dict]:
-    """Load a JSON file containing a list of conversation messages.
+    """Load a conversation file — JSON, JSONL, or v2 dict wrapper.
 
-    Supports both a top-level list and a dict with a ``"messages"`` key.
+    - .jsonl: one JSON object per line (copane v3)
+    - .json with a top-level array: v1 bare-array
+    - .json with a dict containing a "messages" key: v2 format
     """
+    suffix = path.suffix.lower()
+
+    if suffix == ".jsonl":
+        messages: list[dict] = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                messages.append(json.loads(line))
+        if not messages:
+            raise ValueError(f"Empty JSONL file: {path}")
+        return messages
+
+    # Legacy .json formats
     with open(path) as f:
         data = json.load(f)
 
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        # Check for common wrapper keys
         for key in ("messages", "conversation", "history", "data"):
             if key in data and isinstance(data[key], list):
                 return data[key]

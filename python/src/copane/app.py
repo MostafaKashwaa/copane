@@ -208,8 +208,14 @@ def _print_session_view(session_id: str):
         return
 
     if not session_file.exists():
-        print_error(f"Session file not found: {session_id}")
-        return
+        # Fall back to legacy .json (pre-jsonl sessions).
+        # The viewer script handles all formats — no migration needed.
+        legacy = session_store.legacy_session_path(session_id)
+        if legacy.exists():
+            session_file = legacy
+        else:
+            print_error(f"Session file not found: {session_id}")
+            return
 
     # Show a brief header before handing off to the pager
     manifest = session_store.load_manifest()
