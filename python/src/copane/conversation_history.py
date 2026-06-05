@@ -99,13 +99,12 @@ class ConversationHistory:
         if role == "user":
             if self._new_turn_hook is not None:
                 self._new_turn_hook(self.messages, self._turn_id)
+            self._current_turn_start_index = len(self.messages)
             self._turn_id += 1
 
         msg: dict = {"role": role, "content": content,
                      "_turn_id": self._turn_id}
         self.messages.append(msg)
-        self._trim_messages()
-        self._trim_by_byte_budget()
 
     def add_tool_call(self, call_id: str, name: str, arguments: str) -> None:
         """Record a ``function_call`` event in the message history."""
@@ -156,14 +155,13 @@ class ConversationHistory:
                 "_turn_id": self._turn_id,
             }
         )
-        self._trim_messages()
-        self._trim_by_byte_budget()
 
     def clear(self) -> None:
         """Reset the conversation to empty."""
         self.messages = []
         self._trim_warned = False
         self._turn_id = 0
+        self._current_turn_start_index = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
@@ -199,6 +197,7 @@ class ConversationHistory:
             if isinstance(tid, int) and tid > max_turn:
                 max_turn = tid
         self._turn_id = max_turn
+        self._current_turn_start_index = len(self.messages)
 
         self._repair_orphaned_outputs()
         self._repair_orphaned_calls()
@@ -212,24 +211,40 @@ class ConversationHistory:
         self._repair_orphaned_outputs()
         self._repair_orphaned_calls()
 
+    def trim_in_memory(self) -> None:
+        """Drop oldest messages when the byte budget is exceeded.
+
+        Call this *after* saving the full history to disk so the
+        session file retains the complete conversation for /view.
+
+        This is a last-resort OOM safety valve.  With tool outputs
+        already summarized to stubs (~200 bytes each) the 5 MB budget
+        should virtually never be hit — a 500‑turn session with
+        summarised outputs is ~100 KB.
+
+        Safe to call at any time — a no-op when the budget hasn't been
+        exceeded.
+        """
+        self._trim_by_byte_budget()
+
     def estimate_memory_mb(self) -> float:
         """Rough estimate of memory used by the message list (MB)."""
         return self._estimate_total_bytes() / (1024 * 1024)
 
     def for_api(self) -> list[dict]:
-        """Return a shallow copy of messages with internal fields stripped.
+        """Return messages safe for the model API, windowed when too long.
 
-        The OpenAI Agents SDK chat completion converter handles both
-        ``EasyInputMessageParam`` (``{"role", "content"}``) and
-        ``FunctionCallOutput`` (``{"type", "call_id", "output"}``) —
-        neither tolerates extra keys.  This method produces clean dicts
-        safe for the model API while keeping the internal fields on
-        ``self.messages`` for turn-boundary summarization.
+        Internal fields are stripped and, when the user+assistant count
+        exceeds ``MAX_MESSAGES``, only the most recent window is returned
+        (with orphan repair applied to the window).  ``self.messages`` is
+        **never** trimmed — the session file always contains the full
+        conversation.
         """
-        return [
+        clean = [
             {k: v for k, v in m.items() if k not in _INTERNAL_FIELDS}
             for m in self.messages
         ]
+        return self._apply_message_window(clean)
 
     # ── internals ───────────────────────────────────────────────────
 
@@ -242,6 +257,77 @@ class ConversationHistory:
             return total
         except (TypeError, AttributeError, KeyError):
             return 0
+
+    def _apply_message_window(self, messages: list[dict]) -> list[dict]:
+        """Return a windowed copy of *messages* when the user+assistant
+        count exceeds ``MAX_MESSAGES``, repairing orphans afterward.
+
+        Only user and assistant messages count towards the cap — tool
+        calls/outputs and reasoning are ignored because turn-boundary
+        summarization compresses them to ~200-byte stubs that don't
+        meaningfully affect memory or tokens.
+
+        The window keeps the most recent ``TRIM_TARGET_FRACTION`` of
+        ``MAX_MESSAGES`` user+assistant messages.  Does **not** mutate
+        ``self.messages``.
+        """
+        conversation_count = sum(
+            1 for m in messages if m.get("role") in ("user", "assistant")
+        )
+        if conversation_count <= MAX_MESSAGES:
+            return messages
+
+        if not self._trim_warned:
+            print(
+                f"\n⚠ [copane] Message history full "
+                f"({conversation_count} user+assistant messages). "
+                f"{len(messages) - conversation_count} tool/reasoning messages are not counted in the cap. "
+                f"Sending only the most recent messages to the model. "
+                f"Use /clear to reset.\n",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._trim_warned = True
+
+        target = int(MAX_MESSAGES * TRIM_TARGET_FRACTION)
+
+        # Scan backwards from the end; slice once when we've found
+        # "target" user+assistant messages to keep.  Single O(n) pass.
+        keep_count = 0
+        cutoff = len(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+            if m.get("role") in ("user", "assistant"):
+                keep_count += 1
+                if keep_count >= target:
+                    cutoff = i
+                    break
+
+        windowed = messages[cutoff:]
+
+        # Repair orphans on the windowed copy so the model never sees a
+        # function_call_output without its matching function_call.
+        valid_call_ids: set[str] = set()
+        for m in windowed:
+            if m.get("type") == "function_call":
+                cid = m.get("call_id")
+                if cid:
+                    valid_call_ids.add(cid)
+
+        before = len(windowed)
+        windowed = [
+            m
+            for m in windowed
+            if m.get("type") != "function_call_output"
+            or m.get("call_id") in valid_call_ids
+        ]
+        if before != len(windowed):
+            logging.warning(
+                "API window: removed %d orphaned function_call_output(s).",
+                before - len(windowed),
+            )
+
+        return windowed
 
     def _repair_orphaned_outputs(self) -> None:
         """Remove ``function_call_output`` messages whose matching
@@ -308,55 +394,12 @@ class ConversationHistory:
                 removed,
             )
 
-    def _trim_messages(self) -> None:
-        """Trim old messages when user+assistant count exceeds MAX_MESSAGES.
-
-        Only user and assistant messages count towards the cap — 
-        tool calls/outputs and reasoning are ignored because turn-boundary summarization 
-        compresses them to ~200-byte stubs that don't meaningfully affect memory or tokens.
-        Trims back to TRIM_TARGET_FRACTION of MAX_MESSAGES to avoid trimming on every 
-        single add_message call once the cap is hit.
-        """
-        conversation_count = sum(
-            1 for m in self.messages if m.get("role") in ("user", "assistant")
-        )
-        if conversation_count <= MAX_MESSAGES:
-            return
-
-        if not self._trim_warned:
-            print(
-                f"\n⚠ [copane] Message history full "
-                f"({conversation_count} user+assistant messages). "
-                f"{len(self.messages) - conversation_count} tool/reasoning messages are not counted in the cap. "
-                f"Trimming oldest messages to conserve memory. "
-                f"Use /clear to reset.\n",
-                file=sys.stderr,
-                flush=True,
-            )
-            self._trim_warned = True
-
-        target = int(MAX_MESSAGES * TRIM_TARGET_FRACTION)
-
-        # Scan backwards from the end; slice once when we've found "target"
-        # user+assistant messages to keep. Single O(n) pass.
-        keep_count = 0
-        cutoff = len(self.messages)
-        for i in range(len(self.messages) - 1, -1, -1):
-            m = self.messages[i]
-            if m.get("role") in ("user", "assistant"):
-                keep_count += 1
-                if keep_count >= target:
-                    cutoff = i
-                    break
-        self.messages = self.messages[cutoff:]
-        self._repair_orphaned_outputs()
-
     def _trim_by_byte_budget(self) -> None:
-        """Aggressively trim old messages when the byte budget is exceeded.
+        """Drop oldest messages when the byte budget is exceeded.
 
         Keeps the most recent KEEP_RECENT_MESSAGES and drops everything
-        older.  This is a last-resort safety valve — normal trimming
-        happens via ``_trim_messages`` (message-count based).
+        older.  Call ``trim_in_memory()`` *after* saving to disk so the
+        session file retains the full conversation for ``/view``.
         """
         total = self._estimate_total_bytes()
         if total <= MAX_HISTORY_BYTES:

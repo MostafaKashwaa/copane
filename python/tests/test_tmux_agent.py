@@ -134,6 +134,7 @@ def _build_agent(**overrides):
     # conversation history (with mocked methods)
     mock_history = MagicMock(spec=ConversationHistory)
     mock_history.messages = []
+    mock_history._current_turn_start_index = 0
     mock_history.estimate_memory_mb.return_value = 10.0  # well under 50 MB
     mock_history.total_input_tokens = overrides.get("total_input_tokens", 0)
     mock_history.total_output_tokens = overrides.get("total_output_tokens", 0)
@@ -167,10 +168,10 @@ def _build_agent(**overrides):
 
     # tools
     agent.tools = [
-        MagicMock() for _ in range(6)
+        MagicMock() for _ in range(7)
     ]
     for i, name in enumerate(
-        ["read_file", "run_command", "grep_files",
+        ["edit_file", "read_file", "run_command", "grep_files",
             "list_files", "write_file", "get_current_dir"]
     ):
         agent.tools[i].name = name
@@ -195,11 +196,12 @@ class TestInit:
         a = TmuxAgent(name="my-agent")
         assert a.name == "my-agent"
 
-    def test_has_all_six_tools(self):
+    def test_has_all_seven_tools(self):
         a = TmuxAgent(name="test")
-        assert len(a.tools) == 6
+        assert len(a.tools) == 7
         names = {t.name for t in a.tools}
         assert names == {
+            "edit_file",
             "read_file",
             "run_command",
             "grep_files",
@@ -762,10 +764,11 @@ class TestRecreateRunner:
                 response = MagicMock()
                 state = MagicMock()
                 agent._recreate_runner(response, state)
+                from copane.tmux_agent import MAX_TOOL_TURNS
                 mock_run_streamed.assert_called_once_with(
                     agent.agent,
                     state,
-                    max_turns=50,
+                    max_turns=MAX_TOOL_TURNS,
                 )
 
 

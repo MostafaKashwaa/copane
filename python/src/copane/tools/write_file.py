@@ -2,6 +2,10 @@
 
 Shows a diff preview and asks the user to confirm.  Supports *y* (yes),
 *n* (no), and *a* (always allow for the rest of this session).
+
+NOTE: This tool overwrites the entire file.  For small, targeted edits
+use ``edit_file`` instead — it only sends the changed snippet, not the
+whole file.
 """
 
 import os
@@ -24,7 +28,8 @@ async def write_file(
 
     Supports *y* (yes), *n* (no), and *a* (always allow for the rest of
     this session).
-    NOTE: This tool dosn't support range editing, it overwrites the file if it already exists. 
+    NOTE: This tool overwrites the entire file. For small, targeted edits
+    use edit_file instead — it only sends the changed snippet.
     If you want to make changes to an existing file, you have to read the file thoroughly, 
     make the necessary changes to the content, and then write it back using this tool.
     """
