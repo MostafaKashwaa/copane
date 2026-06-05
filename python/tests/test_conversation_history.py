@@ -277,34 +277,69 @@ class TestForApi:
 
 
 class TestCountTrimming:
-    def test_no_trim_when_under_limit(self):
+    def test_no_window_when_under_limit(self):
+        """``for_api()`` returns full list when under MAX_MESSAGES."""
         h = ConversationHistory()
-        # MAX_MESSAGES is 100 — a few messages won't trigger it
         for i in range(20):
             h.add_message("user", f"q{i}")
             h.add_message("assistant", f"a{i}")
         assert len(h.messages) == 40
+        assert len(h.for_api()) == 40
         assert h._trim_warned is False
 
-    def test_trim_triggers_when_over_max(self):
+    def test_for_api_windows_when_over_max(self):
+        """``for_api()`` returns a windowed copy; ``self.messages`` stays intact."""
         h = ConversationHistory()
-        # Force messages past MAX_MESSAGES
         target = MAX_MESSAGES + 10
-        # Build messages directly to avoid triggering the hook
-        # (which does nothing here since we have no tool outputs)
+        # Build enough messages to overflow MAX_MESSAGES
         h.messages = _build_messages(target // 2)
         h.add_message("user", "final")
-        # Should have trimmed down
-        assert len(h.messages) <= int(MAX_MESSAGES * TRIM_TARGET_FRACTION) + 1
 
-    def test_trim_warns_only_once(self, capsys):
+        full_count = len(h.messages)
+        api_messages = h.for_api()
+
+        # The API copy should be windowed
+        assert len(api_messages) <= int(MAX_MESSAGES * TRIM_TARGET_FRACTION) + 1
+        # self.messages must still contain the full history (disk save)
+        assert len(h.messages) == full_count
+
+    def test_window_warns_only_once(self, capsys):
+        """Warning is printed only the first time the window is applied."""
         h = ConversationHistory()
         h.messages = _build_messages(MAX_MESSAGES // 2 + 1)
-        # Should trigger trim
-        h._trim_messages()
-        # Simulate stderr output (the warning uses print-to-stderr)
-        # Just verify _trim_warned is set
+        # First call — should warn
+        h.for_api()
+        out1 = capsys.readouterr().err
+        assert "Message history full" in out1
         assert h._trim_warned is True
+
+        # Second call — no additional warning
+        h.for_api()
+        out2 = capsys.readouterr().err
+        assert out2 == ""
+
+    def test_window_repairs_orphans(self):
+        """Windowed API copy must not contain orphaned function_call_outputs."""
+        h = ConversationHistory()
+        # Build enough user/assistant messages to trigger windowing,
+        # then prepend an orphaned output that should be dropped from
+        # the windowed copy.
+        h.messages = _build_messages(MAX_MESSAGES // 2 + 1)
+        orphan = {
+            "type": "function_call_output",
+            "call_id": "orphan",
+            "output": "no matching call",
+        }
+        # Insert orphan at the front — it would be in the dropped region
+        h.messages.insert(0, orphan)
+
+        api_messages = h.for_api()
+        call_ids = [
+            m.get("call_id")
+            for m in api_messages
+            if m.get("type") == "function_call_output"
+        ]
+        assert "orphan" not in call_ids
 
 
 # -------------------------------------------------------------------

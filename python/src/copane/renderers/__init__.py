@@ -9,7 +9,7 @@ Usage::
     await print_streamed_response(stream, renderer=renderer)
 
 The renderer is selected via the ``COPANE_RENDERER`` environment variable.
-If unset, ``regex`` is used (lightweight ANSI formatting on-the-fly).
+If unset, ``raw_replace_renderer`` is used (lightweight ANSI formatting on-the-fly).
 """
 
 from __future__ import annotations

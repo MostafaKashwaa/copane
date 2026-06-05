@@ -4,6 +4,14 @@ Full file contents are returned within the current turn.  Between
 turns, file-read results are summarized to metadata (path, line count,
 purpose hint) — re-read files at the start of a new turn if exact
 content is needed.
+
+Output is prefixed with line numbers so the model can reference
+accurate positions::
+
+       1  import os
+       2  import sys
+       ...
+
 """
 
 import os
@@ -169,14 +177,22 @@ def read_file(
             error_type="invalid_range",
         )
 
-    raw = "".join(lines[start_line - 1 : end_line])
-    body, truncated = _truncate(raw, _MAX_READ_FILE_SAFETY_LIMIT, label="file content")
+    selected = lines[start_line - 1 : end_line]
+    width = max(3, len(str(start_line + len(selected) - 1)))
+    numbered = "".join(
+        f"{start_line + i:>{width}}  {line}" for i, line in enumerate(selected)
+    )
 
-    # When truncated, add line-range metadata so the LLM can narrow its
-    # next read to the missing portion.
+    body, truncated = _truncate(
+        numbered, _MAX_READ_FILE_SAFETY_LIMIT, label="file content"
+    )
+
     if truncated:
+        # Estimate the actual last line shown after truncation.  Each
+        # output line still has one ``\n``, so counting newlines gives
+        # us the right end-bound.
         actual_start = start_line
-        actual_end = actual_start + body.count("\n")
+        actual_end = actual_start + body.count("\n") - 1
         body += (
             f"\n[Read lines {actual_start}-{actual_end} of {len(lines)} total. "
             f"Use start_line/end_line to read the remaining portion.]"

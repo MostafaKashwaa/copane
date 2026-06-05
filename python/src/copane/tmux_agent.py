@@ -19,6 +19,7 @@ from typing import Any, Dict
 
 from agents import (
     Agent,
+    MaxTurnsExceeded,
     RawResponsesStreamEvent,
     RunItemStreamEvent,
     RunState,
@@ -37,6 +38,7 @@ from openai import AsyncOpenAI
 from copane.tracing import traceable
 
 from copane.tools import (
+    edit_file,
     get_current_dir,
     grep_files,
     list_files,
@@ -50,7 +52,13 @@ from copane.model_provider import ModelProvider
 from copane.conversation_history import ConversationHistory
 from copane import session_store
 
-MAX_TOOL_TURNS = 50  # max turns for a single tool-using response
+MAX_TOOL_TURNS = 20  # hard cap on tool calls per response
+
+# Thresholds for in-band nudge text appended to tool outputs.
+# The model sees these as part of the tool result and can choose to
+# wrap up before hitting the hard cap.
+_BUDGET_NUDGE_AT = 15      # first soft warning
+_BUDGET_LAST_CALL_AT = 19  # final call — demand that the model stop
 
 # Prompt for the title-generation call (tiny, cheap, one-shot per session).
 _TITLE_SYSTEM_PROMPT = """\
@@ -74,6 +82,7 @@ class TmuxAgent:
         self.history = ConversationHistory(new_turn_hook=None)
         self.agent: Agent | None = None
         self.tools: list[Tool] = [
+            edit_file,
             read_file,
             run_command,
             grep_files,
@@ -87,6 +96,7 @@ class TmuxAgent:
         self._first_user_message: str = ""   # for manifest preview
         self._title: str | None = None       # LLM-generated; None until turn 1 completes
         self._title_generated: bool = False  # gate so we only call LLM once
+        self._last_saved_index: int = 0      # messages[:self._last_saved_index] already on disk
 
     # ── Session persistence ─────────────────────────────────────────
 
@@ -96,21 +106,32 @@ class TmuxAgent:
         return self._session_id
 
     def _save_session(self):
-        """Overwrite the current session file with the full message list.
+        """Append new messages to the session JSONL file.
 
-        Called after each assistant response (crash resilience), on
-        ``/clear``, and on exit.
+        Only messages added since the last save are written.
+        The in-memory copy may later be trimmed — the disk file
+        always retains the full conversation for ``/view``.
+        Called after each assistant response, on ``/clear``, and on exit.
         """
         model = self.model_provider.get_model_info().get("name", "")
+        # Clamp: in-memory trimming may have dropped messages that were
+        # already persisted, leaving _last_saved_index past the end.
+        if self._last_saved_index > len(self.history.messages):
+            self._last_saved_index = len(self.history.messages)
+        new_messages = self.history.messages[self._last_saved_index:]
+        if not new_messages:
+            return
         session_store.save_session(
             self._session_id,
-            self.history.messages,
+            new_messages,
             model=model,
             title=self._title,
             first_user_message=self._first_user_message,
             input_tokens=self.history.total_input_tokens,
             output_tokens=self.history.total_output_tokens,
+            append=True,
         )
+        self._last_saved_index = len(self.history.messages)
 
     def save_current_session(self):
         """Public alias so app.py can trigger a save on exit/clear."""
@@ -122,6 +143,7 @@ class TmuxAgent:
         self._first_user_message = ""
         self._title = None
         self._title_generated = False
+        self._last_saved_index = 0
 
     def resume_session(self, session_id: str) -> bool:
         """Save the current session, then load *session_id* into history.
@@ -174,6 +196,12 @@ class TmuxAgent:
 
         self.history._repair_orphaned_outputs()
         self.history._repair_orphaned_calls()
+
+        # All messages are now on disk — nothing new to save
+        self._last_saved_index = len(self.history.messages)
+
+        # After loading full history, trim in-memory so we don't OOM
+        self.history.trim_in_memory()
 
         # Switch to the resumed session identity
         self._session_id = session_id
@@ -248,7 +276,8 @@ class TmuxAgent:
         if current_turn == 0:
             return
 
-        for m in self.history.messages:
+        # Scan only from the current turn's start (O(turn_size), not O(session))
+        for m in self.history.messages[self.history._current_turn_start_index:]:
             if m.get("_turn_id") != current_turn:
                 continue
             if m.get("type") != "function_call_output":
@@ -343,6 +372,29 @@ class TmuxAgent:
                     f"Invalid decision: {decision}. Must be one of 'y', 'n', 'a', 'r', or 'q'."
                 )
 
+    # ── Budget nudge helper ─────────────────────────────────────────
+
+    @staticmethod
+    def _budget_nudge_text(turn_count: int) -> str:
+        """Return the in-band nudge string for a given tool turn.
+
+        Appended to tool outputs so the model sees budget pressure
+        naturally as part of the conversation flow.
+        """
+        if turn_count == _BUDGET_LAST_CALL_AT:
+            return (
+                f"\n\n[{turn_count} of {MAX_TOOL_TURNS} tool turns used. "
+                "This is your LAST tool call. You MUST provide your "
+                "answer next — do NOT call any more tools.]"
+            )
+        if turn_count >= _BUDGET_NUDGE_AT:
+            return (
+                f"\n\n[{turn_count} of {MAX_TOOL_TURNS} tool turns used. "
+                "You can continue, but consider wrapping up and "
+                "providing your answer soon.]"
+            )
+        return ""
+
     @dataclass
     class _StreamingContext:
         """Context for streaming responses, including partial reasoning and text."""
@@ -357,6 +409,9 @@ class TmuxAgent:
         # self.history after each complete assistant response.
         input_tokens: int = 0
         output_tokens: int = 0
+        # Tool turn counter, independent of the runner lifecycle.
+        # Incremented on every tool_called event.
+        tool_turn_count: int = 0
 
     @traceable(run_type="chain", name="Stream Response")
     async def stream_response(self, user_input: str):
@@ -370,31 +425,62 @@ class TmuxAgent:
 
         self.history.add_message("user", user_input)
 
+        ctx = self._StreamingContext()
+
         response = Runner.run_streamed(
             self.agent,
             self.history.for_api(),
             max_turns=MAX_TOOL_TURNS,
         )
 
-        ctx = self._StreamingContext()
-
         while True:
             try:
                 async for event in self._process_runner_events(response, ctx):
                     yield event
+            except MaxTurnsExceeded:
+                # Runner hit its internal turn limit — treat as
+                # normal completion.  Fall through to the hard-cap
+                # gate below.
+                pass
             except Exception as e:
                 yield ("error", f"Error processing response stream: {e}")
-                # Remove orphaned function calls that never got a tool_output
                 self.history.repair_orphans()
                 break
 
+            # ── Handle interruptions ──────────────────────────────
+            if response.interruptions:
+                state = response.to_state()
+                for item in response.interruptions:
+                    yield ("tool_approval", (item, state))
+
+            # ── Hard-cap gate ──────────────────────────────────────
+            # Fires after the runner exits (whether from
+            # MaxTurnsExceeded or natural completion).  Injects a
+            # user message so the model sees an explicit instruction
+            # to wrap up.
+            if ctx.tool_turn_count >= MAX_TOOL_TURNS:
+                yield (
+                    "turn_budget_exhausted",
+                    ctx.tool_turn_count,
+                )
+                self.history.add_message(
+                    "user",
+                    "You have reached the maximum number of tool calls. "
+                    "Please stop calling tools and provide your answer now. "
+                    "Summarize what you have found and ask the user to "
+                    "continue if needed.",
+                )
+                ctx.tool_turn_count = 0
+                response = Runner.run_streamed(
+                    self.agent,
+                    self.history.for_api(),
+                    max_turns=3,
+                )
+                continue
+
+            # ── Exit or continue ──────────────────────────────────
             if not response.interruptions:
                 break
-
-            state = response.to_state()
-
-            for item in response.interruptions:
-                yield ("tool_approval", (item, state))
 
             response = self._recreate_runner(response, state)
 
@@ -423,7 +509,8 @@ class TmuxAgent:
         # always contain stubs, not full tool outputs.
         self._summarize_current_turn()
 
-        self._save_session()  # ← save after every complete assistant response
+        self._save_session()      # append current turn to disk (full history preserved)
+        self.history.trim_in_memory()  # drop oldest if byte budget exceeded (OOM safety)
         self._print_memory_warning()
 
     # ── Title generation ────────────────────────────────────────────
@@ -528,12 +615,15 @@ class TmuxAgent:
                 tool_name = event.item.raw_item.name
                 tool_args = event.item.raw_item.arguments
 
+                ctx.tool_turn_count += 1
+
                 self.history.add_tool_call(tool_call_id, tool_name, tool_args)
                 ctx.pending_tool_calls[tool_call_id] = (tool_name, tool_args)
 
-                # Prevent orphaned tool_calls: if the models hallucinates a non-existent tool name,
-                # add a synthetic error tool output with the same call_id, so the tool_output handler
-                # can still correlate it and avoid leaving a dangling pending_tool_call entry.
+                # Prevent orphaned tool_calls: if the model hallucinates a
+                # non-existent tool name, add a synthetic error tool output
+                # with the same call_id so the tool_output handler can still
+                # correlate it and avoid leaving a dangling pending_tool_call.
                 if tool_name not in [t.name for t in self.tools]:
                     try:
                         tool_args_parsed = (json.loads(tool_args)
@@ -595,9 +685,18 @@ class TmuxAgent:
                 except (json.JSONDecodeError, TypeError):
                     tool_args_parsed = {"raw": str(tool_args)}
 
+                # ── In-band budget nudge ──────────────────────────
+                # Append to the history copy so the model sees the
+                # budget pressure as part of the result.  The UI still
+                # receives the original object (event.item.output) for
+                # proper SUCCESS / ERROR colouring.
+                history_output = output_str + self._budget_nudge_text(
+                    ctx.tool_turn_count
+                )
+
                 self.history.add_tool_output(
                     tool_call_id or "",
-                    output_str,
+                    history_output,
                     tool_name or "unknown",
                     tool_args_parsed or {},
                 )

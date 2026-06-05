@@ -9,19 +9,27 @@ class TestReadFile:
         raw = await invoke(tools.read_file, path=str(sample_file))
         result = parse_result(raw)
         assert result.success is True
-        assert result.output == "line1\nline2\nline3\nline4\nline5\n"
+        # Output includes line numbers, right-padded.  5-line file →
+        # max line number is 1 digit, width = max(3, 1) = 3 → "  1  line1\n"
+        assert result.output == (
+            "  1  line1\n"
+            "  2  line2\n"
+            "  3  line3\n"
+            "  4  line4\n"
+            "  5  line5\n"
+        )
 
     async def test_read_line_range(self, sample_file):
         raw = await invoke(tools.read_file, path=str(sample_file), start_line=2, end_line=4)
         result = parse_result(raw)
         assert result.success is True
-        assert result.output == "line2\nline3\nline4\n"
+        assert result.output == "  2  line2\n  3  line3\n  4  line4\n"
 
     async def test_read_single_line(self, sample_file):
         raw = await invoke(tools.read_file, path=str(sample_file), start_line=3, end_line=3)
         result = parse_result(raw)
         assert result.success is True
-        assert result.output == "line3\n"
+        assert result.output == "  3  line3\n"
 
     async def test_file_not_found(self):
         raw = await invoke(tools.read_file, path="/nonexistent/path/file.txt")
@@ -41,7 +49,7 @@ class TestReadFile:
         raw = await invoke(tools.read_file, path=str(path))
         result = parse_result(raw)
         # Empty file with defaults (start_line=1, end_line=0) should succeed
-        # and return empty output. 
+        # and return empty output.
         assert result.success is True
         assert result.output == ""
 
@@ -65,4 +73,18 @@ class TestReadFile:
         raw = await invoke(tools.read_file, path=str(sample_file), start_line=3)
         result = parse_result(raw)
         assert result.success is True
-        assert result.output == "line3\nline4\nline5\n"
+        assert result.output == "  3  line3\n  4  line4\n  5  line5\n"
+
+    async def test_line_number_width_expands(self, tmp_dir):
+        """Line numbers pad to the width required for the last line."""
+        lines = [f"line{i}\n" for i in range(1, 101)]  # 100 lines
+        path = tmp_dir / "big.txt"
+        path.write_text("".join(lines))
+        raw = await invoke(tools.read_file, path=str(path))
+        result = parse_result(raw)
+        assert result.success is True
+        # First line should be 3-digit padded (100 lines → width=3)
+        first, rest = result.output.split("\n", 1)
+        assert first.startswith("  1  line1")
+        # Line 100 should be 3-digit: "100  line100"
+        assert "100  line100" in result.output

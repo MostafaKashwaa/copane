@@ -262,6 +262,12 @@ async def print_streamed_response(stream_generator, renderer: Renderer | None = 
 
                     agent.handle_tool_approval(item, decision, state)
 
+                case 'turn_budget_exhausted':
+                    print_warning(
+                        f"\n[Maximum tool turns reached. "
+                        f"Please continue in the next message.]\n"
+                    )
+
                 case _:
                     # Unknown event kind — pass through as text
                     renderer.on_text_chunk(str(chunk))
