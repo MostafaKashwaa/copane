@@ -6,7 +6,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with PEP 440 pre-release tags.
 
-## [0.1.0a1] — Unreleased
+## [0.2.0a1] — Unreleased
+
+### Added
+
+- **Pluggable response renderers** — the agent’s streaming output can now be
+  rendered through swappable backends. Included renderers:
+  - `raw_replace_renderer` (default) — in-place streaming that updates the
+    terminal line-by-line, with tool calls and responses rendered inline
+  - `regex_renderer` — pattern-based formatting for structured output
+  - `markdown_it_renderer` — rich Markdown rendering via `markdown-it-py`
+  - `rich_buffer_renderer` — full `rich` library console rendering
+  - `raw_renderer` — minimal passthrough with no terminal control
+  - Interactive `/renderer` command to switch renderers at runtime
+- **Render state machine** (`_state_machine.py`) — drives the streaming
+  display loop: receives parser events, tracks cursor position, manages
+  line buffers, and delegates formatting to the active renderer.
+- **Terminal screen utilities** (`screen_utils.py`) — extracted cursor
+  movement, line clearing, and draw operations used by all renderers.
+- **Inline formatting** (`_inline_formatting.py`) — shared text attribute
+  parsing for bold, italic, code spans, and links across renderers.
+- **Streaming UX overhaul** — tool calls now stream their arguments
+  in-place (instead of appearing after completion), and tool responses
+  render inline with the conversation flow rather than as separate blocks.
+- **Session persistence** (`session_store.py`) — conversations are saved
+  to `~/.copane/sessions/` as JSONL files and can be resumed across
+  Copane restarts. Each session tracks messages, token usage, and metadata.
+- **Conversation viewer** (`view_conversation.py`) — interactive TUI for
+  browsing past sessions. Navigate with j/k, search with `/`, expand/collapse
+  messages, copy content to clipboard. The `/view` command opens the
+  browser and supports both the new `.jsonl` format and legacy `.json` logs.
+- **`edit_file` tool** — makes small, targeted edits to existing files.
+  Sends only the changed snippet to the model (not the entire file),
+  displays a unified-diff preview, and returns a diff summary in the tool
+  result so the model can verify its work.
+- **Budget-nudge mechanism** — when the model approaches the maximum number
+  of tool turns, a soft reminder is appended to tool outputs asking it to
+  wrap up before the hard cap forces a stop.
+- **Slash-command completion** (`completers.py`) — tab-completion for all
+  `/` commands in the Copane prompt, including `/view`, `/renderer`,
+  `/resume`, `/save`, and model switching commands.
+- **Session-level token tracking** — total input and output tokens consumed
+  per session are tracked from API usage data and displayed in the UI
+  status panel and `/view` browser.
+- **Logging and tracing** — `log.py` for structured file logging,
+  `tracing.py` for OpenTelemetry-compatible span export. Noisy runtime
+  trace logs are suppressed by default.
+- **Line numbers in tool output** — `read_file` and `write_file` results
+  now include line numbers, helping the model reference accurate positions
+  in follow-up messages.
+- **Tests:** `test_screen_utils.py`, `test_screen_utils_composed.py`,
+  `test_tool_edit_file.py`, plus expanded `test_tmux_agent.py` and
+  `test_conversation_history.py`.
+
+### Changed
+
+- **Response rendering extracted from `ui.py`** — the monolithic UI module
+  has been split: rendering logic moved to `renderers/`, terminal control
+  to `screen_utils.py`, formatting to `_inline_formatting.py`. `ui.py` now
+  focuses on status panel and layout orchestration.
+- **Session storage format** — switched from a single JSON file overwritten
+  on each save to JSONL append. The full history is always available on
+  disk. Old `.json` session files remain readable via `/view`.
+- **Message windowing** — moved from in-place trimming to a per-API-call
+  copy, so the full conversation history is always preserved for session
+  save and `/view`.
+- **Default tool call/response rendering** — renderers now get sensible
+  fallback rendering for tool calls and results without each renderer
+  implementing it from scratch.
+- **`AGENTS.md`** — updated with new tools, renderer architecture, and
+  development guidance.
+
+### Fixed
+
+- **Groq provider compatibility** — tool schemas now validated and stripped
+  of non-typed fields before submission, fixing `invalid schema` errors
+  with Groq-hosted models.
+- **Code sending indentation** — code blocks sent to the model no longer
+  have leading whitespace mangled by tmux copy-paste.
+- **Empty tool result crashes** — the UI no longer crashes when a tool
+  returns an empty output string.
+- **API key handling** — reverted to empty-string default to avoid
+  accidental leakage in logs.
+- **`_truncate` return type** — fixed to match the tuple shape expected
+  by existing tests.
+- **Table rendering** — wide cells in tool output tables no longer overflow
+  or misalign.
+
+## [0.1.0a1]
 
 ### Added
 
