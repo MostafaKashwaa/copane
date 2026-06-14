@@ -18,10 +18,17 @@ for seamless code review, explanation, refactoring, and testing.
 - **Zero Manual Setup**: Python virtual environment is created automatically
   on first `:CopaneOpen`
 - **Pluggable Renderers**: Choose how LLM responses are displayed:
-  raw passthrough, inline ANSI markup, streaming markdown parsing, or
-  rich terminal formatting
-- **Multi-mode Tab Completion**: File paths after `@`, slash commands,
-  and model keys after `/switch`
+  streaming ANSI replace (default), raw passthrough, inline regex markup,
+  streaming markdown-it parsing, or rich terminal formatting — switch at
+  runtime with `/renderer`
+- **Session Persistence**: Conversations are saved automatically as JSONL
+  files in `~/.copane/sessions/` and can be resumed, viewed, renamed, or
+  deleted with `/resume`, `/view`, `/rename`, and `/delete`
+- **Surgical File Editing**: The `edit_file` tool makes targeted in-file
+  edits with a unified-diff preview, avoiding full-file rewrites
+- **Multi-mode Tab Completion**: File paths after `@`, slash commands
+  (`/renderer`, `/resume`, `/view`, …), model keys after `/switch`, and
+  renderer names after `/renderer`
 
 ## Installation
 
@@ -100,18 +107,26 @@ Control how LLM responses are displayed by setting `COPANE_RENDERER` in
 your `~/.copane.env`:
 
 ```bash
-# Default: raw (no formatting)
+# Default: raw_replace (lightweight ANSI formatting on-the-fly)
 COPANE_RENDERER=regex
 
 # Available renderers:
-#   raw          — Passthrough, no markdown (default)
+#   raw_replace  — Stream raw, replace **bold**/`code`/etc. in-place (default)
+#   raw          — Passthrough, no markdown
 #   regex        — Inline **bold**, *italic*, `code` (zero deps)
 #   markdown_it  — Streaming CommonMark parser (needs markdown-it-py)
 #   rich_buffer  — Raw during stream, replaced with rich at end (needs rich)
 ```
 
-The `regex` renderer works out of the box. For `markdown_it` or `rich_buffer`,
-install the optional dependencies:
+You can also switch renderers at runtime from inside the copane pane:
+
+```
+/renderer markdown_it
+/renderer
+```
+
+The `regex` and `raw_replace` renderers work out of the box. For
+`markdown_it` or `rich_buffer`, install the optional dependencies:
 
 ```bash
 cd ~/.vim/plugged/copane/python
@@ -249,6 +264,13 @@ Type questions directly. Special commands:
 | `/modelinfo` | Show current model info |
 | `/clear` | Clear conversation history |
 | `/help` | Show help |
+| `/renderer [key]` | List or switch response renderer |
+| `/sessions` | List saved sessions |
+| `/save [title]` | Save current conversation |
+| `/resume <id>` | Resume a saved session |
+| `/view <id>` | View a session in rich pager |
+| `/rename <id> <title>` | Rename a saved session |
+| `/delete <id>` | Delete a saved session |
 
 Include files in your query with `@filename`. Example:
 
@@ -258,8 +280,10 @@ review this @main.py for any bugs
 
 **Tab completion** is available for:
 - File paths after `@` (e.g. `@src/ma` → `@src/main.py`)
-- Slash commands (e.g. `/sw` → `/switch`)
+- Slash commands (e.g. `/re` → `/renderer`)
 - Model keys after `/switch` (e.g. `/switch dee` → `/switch deepseek-chat`)
+- Renderer names after `/renderer` (e.g. `/renderer raw` → `/renderer raw_replace`)
+- Session IDs after `/resume`, `/view`, `/delete`, `/rename`
 
 Press `Ctrl+J` to submit multi-line input.
 
@@ -324,10 +348,11 @@ Or add custom models by editing `~/.config/tmux-agent/model_config.json`.
 
 copane supports pluggable renderers that control how the LLM's response
 is displayed in the terminal. Select one by setting `COPANE_RENDERER` in
-`~/.copane.env`.
+`~/.copane.env`, or switch at runtime with `/renderer`.
 
 | Renderer | What it does | Dependencies |
 |----------|-------------|--------------|
+| `raw_replace` | Streams text as it arrives, replaces `**bold**`, `` `code` ``, and other inline markup with ANSI formatting in-place. **(default)** | None |
 | `raw` | Prints text exactly as it arrives. No formatting. | None |
 | `regex` | Converts `**bold**`, `*italic*`, `` `code` `` to ANSI colors on-the-fly. | None |
 | `markdown_it` | Buffers chunks, parses with CommonMark tokenizer, renders stable blocks to ANSI. | `markdown-it-py` |
@@ -353,26 +378,39 @@ copane/
 │   └── src/
 │       └── copane/
 │           ├── __init__.py
-│           ├── app.py          ← Main AI application (entry point)
+│           ├── _version.py     ← Package version
+│           ├── app.py          ← Main AI application (entry point, slash commands)
 │           ├── cli.py          ← CLI argument parsing
-│           ├── ui.py           ← Banner, streaming output, diff display
-│           ├── tmux_agent.py   ← Agent + ModelConfig logic
-│           ├── completers.py   ← Multi-mode Tab completer (files, commands, model keys)
+│           ├── ui.py           ← Layout orchestration, status panel
+│           ├── tmux_agent.py   ← Agent runner, tool loop
+│           ├── model_config.py ← Model definitions and selection
+│           ├── model_provider.py ← Provider abstraction (OpenAI, Groq, Ollama)
+│           ├── conversation_history.py ← Message windowing and truncation
+│           ├── completers.py   ← Multi-mode tab completer
+│           ├── session_store.py ← JSONL session persistence
+│           ├── view_conversation.py ← Interactive session browser
+│           ├── screen_utils.py ← Terminal cursor and draw operations
+│           ├── log.py          ← Structured file logging
+│           ├── tracing.py      ← OpenTelemetry-compatible span export
 │           ├── renderers/      ← Pluggable streaming response renderers
-│           │   ├── _base.py          ← Renderer ABC (contract)
-│           │   ├── __init__.py       ← get_renderer() factory
-│           │   ├── raw_renderer.py   ← Raw passthrough (default)
-│           │   ├── regex_renderer.py ← Inline ANSI markup
+│           │   ├── _base.py               ← Renderer ABC (contract)
+│           │   ├── _state_machine.py      ← Streaming display state machine
+│           │   ├── _inline_formatting.py  ← Shared markdown→ANSI helpers
+│           │   ├── __init__.py            ← get_renderer() factory
+│           │   ├── raw_replace_renderer.py ← Streaming ANSI replace (default)
+│           │   ├── raw_renderer.py         ← Raw passthrough
+│           │   ├── regex_renderer.py       ← Inline ANSI markup
 │           │   ├── markdown_it_renderer.py ← Streaming markdown-it-py
 │           │   └── rich_buffer_renderer.py ← Rich terminal formatting
 │           ├── tools/
 │           │   ├── __init__.py
 │           │   ├── _base.py          ← ToolResult, truncation, safety helpers
 │           │   ├── read_file.py
+│           │   ├── write_file.py
+│           │   ├── edit_file.py      ← Surgical in-file edits with diff preview
 │           │   ├── run_command.py
 │           │   ├── grep_files.py
 │           │   ├── list_files.py
-│           │   ├── write_file.py
 │           │   └── get_current_dir.py
 │           ├── file_utils.py   ← File completion & expansion
 │           ├── term_styles.py  ← Terminal styling and colors
