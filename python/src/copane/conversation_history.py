@@ -10,6 +10,8 @@ turn-boundary summarization is injected via a ``new_turn_hook`` callable set by 
 
 import logging
 import sys
+
+from copane.log import log
 from typing import Callable
 
 # ---------------------------------------------------------------------------
@@ -425,3 +427,5 @@ class ConversationHistory:
             keep,
             self._estimate_total_bytes() // 1024,
         )
+        log("trimmed %d messages from memory (~%d KB)",
+            dropped, self._estimate_total_bytes() // 1024)
