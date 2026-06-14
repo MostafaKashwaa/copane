@@ -548,15 +548,7 @@ class TmuxAgent:
         model_name = info.get("name", "")
         base_url = info.get("base_url", "")
         env_key = info.get("env_key", "")
-        model_type = info.get("type", "")
-        if model_type == "local":
-            # Use a non-empty placeholder — Ollama ignores it, but newer
-            # OpenAI SDKs reject empty strings and fall back to OPENAI_API_KEY.
-            api_key = "ollama"
-        elif env_key:
-            api_key = os.getenv(env_key, "")
-        else:
-            api_key = ""
+        api_key = os.getenv(env_key, "") if env_key else ""
 
         client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
