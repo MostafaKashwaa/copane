@@ -50,15 +50,16 @@ from copane.tools import (
 from copane.model_config import ModelConfig
 from copane.model_provider import ModelProvider
 from copane.conversation_history import ConversationHistory
+from copane.log import log
 from copane import session_store
 
-MAX_TOOL_TURNS = 20  # hard cap on tool calls per response
+MAX_TOOL_TURNS = 50  # hard cap on tool calls per response
 
 # Thresholds for in-band nudge text appended to tool outputs.
 # The model sees these as part of the tool result and can choose to
 # wrap up before hitting the hard cap.
-_BUDGET_NUDGE_AT = 15      # first soft warning
-_BUDGET_LAST_CALL_AT = 19  # final call — demand that the model stop
+_BUDGET_NUDGE_AT = 45      # first soft warning
+_BUDGET_LAST_CALL_AT = 49  # final call — demand that the model stop
 
 # Prompt for the title-generation call (tiny, cheap, one-shot per session).
 _TITLE_SYSTEM_PROMPT = """\
@@ -132,6 +133,9 @@ class TmuxAgent:
             append=True,
         )
         self._last_saved_index = len(self.history.messages)
+        log("saved %d messages to %s (turn %d, title=%r)",
+            len(new_messages), self._session_id[:19],
+            self.history.turn_id, self._title)
 
     def save_current_session(self):
         """Public alias so app.py can trigger a save on exit/clear."""
@@ -161,7 +165,10 @@ class TmuxAgent:
 
         messages = session_store.load_session(session_id)
         if messages is None:
+            log("resume_session FAILED: session not found %s", session_id[:19])
             return False
+
+        log("resume_session %s: loaded %d messages", session_id[:19], len(messages))
 
         # Restore token counts from session metadata (v2) or zero (v1).
         meta = session_store.load_session_meta(session_id)
@@ -290,7 +297,11 @@ class TmuxAgent:
 
             args = m.get("_tool_args", {})
             output = m.get("output", "")
-            summary = summarizer(args, output)
+            try:
+                summary = summarizer(args, output)
+            except Exception as e:
+                log("summarizer FAILED for %r: %s", tool_name, e)
+                continue
             if summary is not None:
                 m["output"] = summary
 
@@ -302,8 +313,10 @@ class TmuxAgent:
 
     def clear_messages(self):
         """Clear the conversation history and start a new session."""
+        old_id = self._session_id
         self.history.clear()
         self._new_session_id()
+        log("session cleared: %s → %s", old_id[:19], self._session_id[:19])
 
     def get_message_count(self) -> int:
         """Get the number of conversation rounds."""
@@ -331,6 +344,7 @@ class TmuxAgent:
         """Switch to a different model."""
         self.model_provider.switch_model(model_key)
         self.agent = None
+        log("model switched to %s", model_key)
 
     def setup(self):
         """Setup the agent with the selected model.
@@ -459,6 +473,8 @@ class TmuxAgent:
             # user message so the model sees an explicit instruction
             # to wrap up.
             if ctx.tool_turn_count >= MAX_TOOL_TURNS:
+                log("turn budget EXHAUSTED at turn %d (session %s)",
+                    ctx.tool_turn_count, self._session_id[:19])
                 yield (
                     "turn_budget_exhausted",
                     ctx.tool_turn_count,
@@ -494,14 +510,16 @@ class TmuxAgent:
         # Generate a title from the first user+assistant exchange.
         # This is a cheap one-shot LLM call (~10 output tokens) that
         # only fires on turn 1.  Fail silently — the title is a nice-to-have.
-        if self.history.turn_id == 1 and not self._title_generated:
+        # if self.history.turn_id == 1 and not self._title_generated:
+        if not self._title_generated:
             try:
                 self._title = await self._generate_title(
                     self._first_user_message,
                     ctx.text_response,
                 )
-            except Exception:
-                pass
+                log("title generated for %s: %r", self._session_id[:19], self._title)
+            except Exception as e:
+                log("title generation FAILED for %s: %s", self._session_id[:19], e)
             finally:
                 self._title_generated = True
 
@@ -530,7 +548,15 @@ class TmuxAgent:
         model_name = info.get("name", "")
         base_url = info.get("base_url", "")
         env_key = info.get("env_key", "")
-        api_key = os.getenv(env_key, "") if env_key else ""
+        model_type = info.get("type", "")
+        if model_type == "local":
+            # Use a non-empty placeholder — Ollama ignores it, but newer
+            # OpenAI SDKs reject empty strings and fall back to OPENAI_API_KEY.
+            api_key = "ollama"
+        elif env_key:
+            api_key = os.getenv(env_key, "")
+        else:
+            api_key = ""
 
         client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 

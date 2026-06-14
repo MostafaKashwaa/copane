@@ -170,9 +170,12 @@ class ModelProvider:
             )
 
         elif model_type == "local":
+            # Use a non-empty placeholder API key — Ollama ignores it, but
+            # newer versions of the OpenAI SDK reject empty strings and
+            # fall back to the OPENAI_API_KEY env var (which may not be set).
             client = AsyncOpenAI(
                 base_url=base_url,
-                api_key="",
+                api_key="ollama",
             )
             model = OpenAIChatCompletionsModel(
                 model=model_name,
