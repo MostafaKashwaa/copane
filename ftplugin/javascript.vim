@@ -34,8 +34,8 @@ nnoremap <buffer> <silent> <leader>ta :call tmux_agent#send()<CR>
 vnoremap <buffer> <silent> <leader>ta :<C-u>call tmux_agent#send_visual()<CR>
 
 " Explain JavaScript/TypeScript code
-nnoremap <buffer> <silent> <leader>te :call tmux_agent#send_with_prompt('Explain this ' . b:copane_language . ' code:')<CR>
-vnoremap <buffer> <silent> <leader>te :<C-u>call tmux_agent#send_visual_with_prompt('Explain this ' . b:copane_language . ' code:')<CR>
+nnoremap <buffer> <silent> <leader>tx :call tmux_agent#send_with_prompt('Explain this ' . b:copane_language . ' code:')<CR>
+vnoremap <buffer> <silent> <leader>tx :<C-u>call tmux_agent#send_visual_with_prompt('Explain this ' . b:copane_language . ' code:')<CR>
 
 " Generate tests
 nnoremap <buffer> <silent> <leader>tt :call tmux_agent#send_with_prompt('Write tests for this ' . b:copane_language . ' code:')<CR>

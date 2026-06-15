@@ -185,7 +185,7 @@ function! s:setup_global_mappings() abort
   " Open/Close/Toggle tmux pane
   execute 'nnoremap <silent> ' . prefix . 'o :CopaneOpen<CR>'
   execute 'nnoremap <silent> ' . prefix . 'c :CopaneClose<CR>'
-  execute 'nnoremap <silent> ' . prefix . 't :CopaneToggle<CR>'
+  execute 'nnoremap <silent> ' . prefix . 'w :CopaneToggle<CR>'
 
   " Send code
   execute 'nnoremap <silent> ' . prefix . 's :CopaneSend<CR>'
@@ -196,7 +196,7 @@ function! s:setup_global_mappings() abort
   execute 'nnoremap <silent> ' . prefix . 'M :CopaneListModels<CR>'
 
   " Config files
-  execute 'nnoremap <silent> ' . prefix . 'e :CopaneEditSecrets<CR>'
+  execute 'nnoremap <silent> ' . prefix . 'v :CopaneEditSecrets<CR>'
   execute 'nnoremap <silent> ' . prefix . 'E :CopaneEditConfig<CR>'
 
   " Help
