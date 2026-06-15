@@ -23,8 +23,8 @@ nnoremap <buffer> <silent> <leader>ta :call tmux_agent#send()<CR>
 vnoremap <buffer> <silent> <leader>ta :<C-u>call tmux_agent#send_visual()<CR>
 
 " Explain Python code
-nnoremap <buffer> <silent> <leader>te :call tmux_agent#send_with_prompt('Explain this Python code:')<CR>
-vnoremap <buffer> <silent> <leader>te :<C-u>call tmux_agent#send_visual_with_prompt('Explain this Python code:')<CR>
+nnoremap <buffer> <silent> <leader>tx :call tmux_agent#send_with_prompt('Explain this Python code:')<CR>
+vnoremap <buffer> <silent> <leader>tx :<C-u>call tmux_agent#send_visual_with_prompt('Explain this Python code:')<CR>
 
 " Generate tests for Python code
 nnoremap <buffer> <silent> <leader>tt :call tmux_agent#send_with_prompt('Write unit tests for this Python code:')<CR>

@@ -362,20 +362,20 @@ To use a different prefix: >
 Mapping              Mode   Action~
 <Leader>to           normal Open copane pane (:CopaneOpen)
 <Leader>tc           normal Close copane pane (:CopaneClose)
-<Leader>tt           normal Toggle copane pane (:CopaneToggle)
+<Leader>tw           normal Toggle copane pane (:CopaneToggle)
 <Leader>ts           normal Send current buffer (:CopaneSend)
 <Leader>ts           visual Send visual selection (:CopaneSendVisual)
 <Leader>tm           normal Show current model info (:CopaneModelInfo)
 <Leader>tM           normal List available models (:CopaneListModels)
-<Leader>te           normal Edit secrets file (:CopaneEditSecrets)
+<Leader>tv           normal Edit secrets file (:CopaneEditSecrets)
 <Leader>tE           normal Edit model config (:CopaneEditConfig)
 <Leader>th           normal Show help (:CopaneHelp)
 
 Filetype-specific mappings (ftplugin/) add:
 <Leader>ta           normal Send buffer (Python/JS buffers)
 <Leader>ta           visual Send selection (Python/JS buffers)
-<Leader>te           normal Explain code (Python/JS buffers)
-<Leader>te           visual Explain selection (Python/JS buffers)
+<Leader>tx           normal Explain code (Python/JS buffers)
+<Leader>tx           visual Explain selection (Python/JS buffers)
 <Leader>tt           normal Write tests (Python/JS buffers)
 <Leader>tt           visual Write tests for selection (Python/JS buffers)
 
