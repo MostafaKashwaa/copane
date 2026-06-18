@@ -8,6 +8,7 @@ are available, whether they are reachable, and how to build an
 import logging
 import os
 from typing import Any, Dict
+from datetime import datetime
 
 from agents import Agent, OpenAIChatCompletionsModel, Tool
 from openai import AsyncOpenAI
@@ -182,18 +183,42 @@ class ModelProvider:
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        web_search_section = (
+            """  Use `web_search` to find current documentation, recent solutions, or
+  information beyond your knowledge cutoff.
+
+  Use `web_search` when the answer depends on information that may have changed since your knowledge cutoff, such as:
+  - Recent updates to libraries or frameworks
+  - New tools or technologies
+  - Current best practices or community standards
+  - Information about specific libraries, functions, or error messages that may not be well-documented in your training data
+  or anything where staleness matters.
+  Prefer a single well-crafted web search over multiple broad ones.
+  Query formulation: use keywords, include version numbers, or dates when relevant, and be specific to get the best results.
+  Request 1-3 results for specific facts, 5+ for broader research."""
+            if os.environ.get("SERPER_API_KEY", "").strip()
+            else ""
+        )
+        tool_list_desc = (
+            "You have tools to read files, run commands, search code, search the web, edit files, and write files."
+            if os.environ.get("SERPER_API_KEY", "").strip()
+            else "You have tools to read files, run commands, search code, edit files, and write files."
+        ) 
         return Agent(
             name=agent_name,
-            instructions="""
+            instructions=f"""
 You are a coding assistant running inside a tmux pane.
+Current date is {current_date}.
 The user will send you code snippets or questions from their editor.
-You have tools to read files, run commands, search code, edit files, and write files.
+{tool_list_desc}
 Tool outputs are JSON objects with a `success` boolean, an output string, an error_type string or null, 
 and a `truncated` boolean indicates whether the output is truncated.
 Use the tools proactively — don't just answer from the snippet alone.
 Before calling a tool, briefly say what you're about to do and why, in one natural sentence.
 Read surrounding context, check imports, run tests, check git history
 if it helps you give a better answer.
+{web_search_section}
 
 Be concise. Code first, explanation after.
 For small, targeted changes to existing files use edit_file — copy the exact lines

@@ -91,6 +91,14 @@ class TmuxAgent:
             write_file,
             get_current_dir,
         ]
+
+        # Web search is only available when the user has configured a
+        # Serper.dev API key.  The tool is conditionally appended so
+        # the model never sees it when it can't succeed.
+        if os.environ.get("SERPER_API_KEY", "").strip():
+            from copane.tools import web_search
+
+            self.tools.append(web_search)
         self.model_config = ModelConfig()
         self.model_provider = ModelProvider(self.model_config)
         self._session_id: str = session_store.generate_session_id()

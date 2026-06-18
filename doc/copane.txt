@@ -34,7 +34,7 @@ Features:
   - Multi-mode Tab completion (files, slash commands, model keys)
   - Conversation history across buffer splits
   - Multi-line input (Ctrl+J to submit)
-  - AI agent tools (read files, run commands, grep, list files)
+  - AI agent tools (read files, run commands, grep, list files, web search)
 
 ==============================================================================
 2. INSTALLATION                                         *copane-installation*
@@ -117,6 +117,7 @@ Add your API keys. Supported variables:
 >
     DEEPSEEK_API_KEY=sk-...
     OPENAI_API_KEY=sk-...
+    SERPER_API_KEY=your_key_here    # optional — enables web search
     GROQ_API_KEY=gsk_your-groq-api-key
     OPENROUTER_API_KEY=sk-or-v1-your-openrouter-api-key
     OLLAMA_BASE_URL=http://localhost:11434
@@ -470,6 +471,7 @@ proactively to understand your codebase:
   - run_command(cmd)
   - grep_files(pattern, path, file_glob)
   - list_files(path, depth)
+  - web_search(query, num_results)  # requires SERPER_API_KEY
   - write_file(path, content)     — requires confirmation
   - get_current_dir()
 
@@ -690,7 +692,8 @@ Then use:
     │           │   ├── grep_files.py       # grep_files tool
     │           │   ├── list_files.py       # list_files tool
     │           │   ├── write_file.py       # write_file tool
-    │           │   └── get_current_dir.py
+    │           │   ├── get_current_dir.py
+    │           │   └── web_search.py      # web search (Serper.dev)
     │           ├── file_utils.py    # File completer, @file expansion
     │           ├── term_styles.py   # ANSI colors, logo, print helpers
     │           └── check_deps.py    # Dependency checker

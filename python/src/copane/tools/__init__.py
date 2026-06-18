@@ -25,6 +25,7 @@ from .grep_files import grep_files, summarize as _sum_grep
 from .list_files import list_files, summarize as _sum_ls
 from .read_file import read_file, summarize as _sum_read
 from .run_command import run_command, summarize as _sum_cmd
+from .web_search import web_search, summarize as _sum_web
 from .write_file import write_file, summarize as _sum_write
 
 # ── Lookup table for the agent's dispatch loop ────────────────────────
@@ -35,5 +36,6 @@ TOOL_SUMMARIZERS: dict[str, "function"] = {
     "grep_files": _sum_grep,
     "list_files": _sum_ls,
     "get_current_dir": _sum_getcwd,
+    "web_search": _sum_web,
     "write_file": _sum_write,
 }

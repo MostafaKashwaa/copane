@@ -196,9 +196,9 @@ class TestInit:
         a = TmuxAgent(name="my-agent")
         assert a.name == "my-agent"
 
-    def test_has_all_seven_tools(self):
+    def test_has_all_eight_tools(self):
         a = TmuxAgent(name="test")
-        assert len(a.tools) == 7
+        assert len(a.tools) == 8
         names = {t.name for t in a.tools}
         assert names == {
             "edit_file",
@@ -206,6 +206,7 @@ class TestInit:
             "run_command",
             "grep_files",
             "list_files",
+            "web_search",
             "write_file",
             "get_current_dir",
         }

@@ -8,11 +8,13 @@ from copane import tools as tools_module
 
 # Collect all tools — keep in sync so schema tests cover everything
 _ALL_TOOLS: list[FunctionTool] = [
+    tools_module.edit_file,
     tools_module.read_file,
     tools_module.run_command,
     tools_module.grep_files,
     tools_module.list_files,
     tools_module.get_current_dir,
+    tools_module.web_search,
     tools_module.write_file,
 ]
 
